@@ -119,10 +119,14 @@ void WeaselPanel::_ResizeWindow() {
 // 只把窗口压到"工作区以内"是不够的：1805px 的面板照样被夹到光标左边 960px。
 // 所以这里的目标是工作区的 2/3，手段按"信息损失从小到大"排序：
 //   ① 字号若是上一帧缩过的，内容变窄了就恢复配置字号；
-//   ② 截断候选**显示**文本（`style.candidate_abbreviate_length` 同一套语义：
-//      只影响面板显示与 ITfCandidateListUIElement::GetString，上屏内容由服务端
-//      commit 决定，不受影响），截断后总长下限 6 个字符（含结尾的 "..."）；
-//   ③ 候选已经到截断下限还超预算，才缩字号（下限 85%）。
+//   ② 让候选**折行**（`style.max_width` 那套机制，HorizontalLayout 自己会折，
+//      一个字都不丢）—— 这是默认手段；
+//   ③ 折行也装不下（单个候选本身就比预算宽）就**缩字号**（下限 85%）：可逆、
+//      不丢字，所以排在截断之前；
+//   ④ 字号到底仍超预算，最后才截断候选**显示**文本
+//      （`style.candidate_abbreviate_length` 同一套语义：只影响面板显示与
+//      ITfCandidateListUIElement::GetString，上屏内容由服务端 commit 决定，
+//      不受影响），截断后总长下限 6 个字符（含结尾的 "..."）。
 // 同帧内只朝一个方向走（缩小），绝不放大 → 不会出现"窗口 1805 而字模 1934"
 // 那种尺寸/字模不一致（那会把最右边的候选裁掉）。
 //
@@ -131,6 +135,10 @@ void WeaselPanel::_ResizeWindow() {
 // 实际长度为 limit+2 的串，二者合起来让宽度停在一个高于预算的不动点上，4 次迭代
 // 全烧在那里，缩字号永远轮不到（真机 pos.log.3248 第 275 帧：cx 连三轮 1425、
 // trim 恒为 12，最终 6/6 帧超预算）。
+// 候选行"适配工作区宽度"时允许缩到的最小字号百分比（见 _FitToWorkAreaWidth）。
+// 顺序是 换行 → 缩字号 → 截断文本：缩字号可逆、不丢信息，所以在截断之前。
+static const int kMinFitFontPercent = 85;
+
 // 返回 true = 已改动，调用方需要重新 DoLayout。
 bool WeaselPanel::_FitToWorkAreaWidth() {
   if (!pDWR || !m_layout || m_ctx.empty())
@@ -151,9 +159,23 @@ bool WeaselPanel::_FitToWorkAreaWidth() {
   if (cx <= 0 || budget <= 0)
     return false;
 
+  // 换行的守门：折成很多行时窗口会比工作区还高，那还不如回到"截断文本"。
+  // 只在已经试过换行（m_fitWrapWidth > 0，且布局已按它重建）时判断一次，
+  // 放弃时置 -1 并返回 true，让调用方按皮肤配置重建布局、改走 ③/④。
+  if (m_fitWrapWidth > 0 &&
+      m_layout->GetContentSize().cy > workArea.Height() / 2) {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[ui] fit wrap rejected: height=%d > workarea/2=%d",
+                 m_layout->GetContentSize().cy, workArea.Height() / 2);
+    m_fitWrapWidth = -1;
+    return true;
+  }
+
   // ① 字号恢复：缩过字号、而按估算复原后仍能装进预算，就回到配置字号。
   //    估算偏乐观时下一帧会再缩回去（幅度很小，不会来回抖）。
-  if (m_fitFontPercent < 100) {
+  //    本帧已经缩过字号就不再恢复：否则会和 ③ 在同一帧里来回拉锯（见成员注释）。
+  if (m_fitFontPercent < 100 && !m_fitFontShrunkThisFrame) {
     const long long fullEst =
         (long long)cx * 100 * 103 / (m_fitFontPercent * 100);
     if (fullEst <= budget) {
@@ -163,10 +185,35 @@ bool WeaselPanel::_FitToWorkAreaWidth() {
       }
       return false;
     }
-    return false;  // 还得保持缩过的字号：本帧不动
+    // 全字号装不下 ⇒ 保持缩小的字号，但**不能**在这里收工：换行/再缩/截断都排在
+    // 下面，一 return 就等于整帧放弃宽度适配。真机 pos.log.16200：字号停在 95%
+    // 的那些帧因此连 fit wrap 都没跑，面板宽到 2219px（1920 屏）并贴到 x=0，
+    // 右侧候选被直接推出屏幕（106/288 帧超预算就是这么来的）。
   }
   if (cx <= budget)
     return false;  // 收敛
+
+  // ② 换行优先：一行放不下时先让候选折行（HorizontalLayout 按 style.max_width
+  //    折，一个字都不丢），而不是立刻去截断显示文本。宽度按工作区反推，并留出
+  //    边距/描边余量——否则折完 cx 仍比 budget 大一点点，会误触发下一轮的截断。
+  //    皮肤自己配了更窄的上限就尊重它（只在配置为 0、或比预算还宽时才接管）。
+  if (m_fitWrapWidth == 0) {
+    const int allowance = DPI_SCALE(abs(m_style.margin_x)) * 2 +
+                          DPI_SCALE(abs(m_style.border)) * 2 + 16;
+    const int want_px = budget - allowance;
+    const float scale = (dpiScaleLayout > 0.f) ? dpiScaleLayout : 1.f;
+    // want_px/want 单位说明：style.max_width 是逻辑像素，Layout 构造时按 DPI 放大
+    const int want = (int)(want_px / scale);
+    if (want_px > 0 && want > 200 &&
+        (m_style.max_width <= 0 || m_style.max_width > want)) {
+      m_fitWrapWidth = want;
+      weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+      if (log.enabled())
+        log.Writef("[ui] fit wrap cx=%d budget=%d max=%d logical", cx, budget,
+                   want);
+      return true;  // 调用方按 m_layoutWrapWidth 重建布局
+    }
+  }
 
   // 本帧第一次进来时快照"截断前"的候选文本；之后每轮都从这份快照重新截断，
   // 保证估算建立在原始长度上（见头文件里 m_fitOrigCandies 的注释）。
@@ -183,9 +230,30 @@ bool WeaselPanel::_FitToWorkAreaWidth() {
     m_fitOrigValid = true;
   }
 
-  // ② 截断候选显示文本（下限 kMinChars，含结尾的 "..."）
-  //    no_progress：本轮行宽没比上一轮小 ⇒ 截断已经榨不出宽度了，别再试，直接
-  //    落到 ③ 缩字号（否则长候选会把迭代次数一路烧到上限）。
+  // ③ 缩字号：折行救不了时的第一选择 —— 缩字号可逆、不丢信息，所以排在截断显示
+  //    文本之前。真机（pos.log.23768）：单个 60+ 字的超长句候选独占一行仍是
+  //    1330~1480px，缩到 95% 就能装回 1274 以内，一个字都不用砍。
+  //    下限 kMinFitFontPercent，不再往下缩。
+  {
+    // 按当前字号等比推算：宽度 ≈ 随字号线性变化，所以用 m_fitFontPercent（而不是
+    // 固定的 100）做基准，缩过之后还能继续往下走（100 → 96 → …）直到下限。
+    int next = (int)((long long)m_fitFontPercent * budget / cx);
+    if (next < kMinFitFontPercent)
+      next = kMinFitFontPercent;
+    // 只朝更小的方向走：否则会和上面 ① 的字号恢复来回拉锯
+    if (next < m_fitFontPercent) {
+      if (_ApplyFitFontPercent(next)) {
+        m_fitFontShrunkThisFrame = true;
+        _FitLog(cx, budget, 0, next);
+        return true;
+      }
+      return false;  // InitResources 抛异常：本帧不改字号
+    }
+  }
+
+  // ④ 最后手段：截断候选**显示**文本（下限 kMinChars，含结尾的 "..."）。
+  //    只有"字号已经到下限、行宽仍然超预算"才会走到这里。
+  //    no_progress：本轮行宽没比上一轮小 ⇒ 截断已经榨不出宽度了，别再试。
   const bool no_progress = (m_fitLastCx > 0 && cx >= m_fitLastCx);
   m_fitLastCx = cx;
   const int kMinChars = 6;
@@ -214,22 +282,10 @@ bool WeaselPanel::_FitToWorkAreaWidth() {
     if (limit < (int)m_fitOrigMaxLen && limit != m_fitTryLimit &&
         _ApplyFitTrim((size_t)limit)) {
       m_fitTryLimit = limit;
-      _FitLog(cx, budget, limit, 100);
+      _FitLog(cx, budget, limit, m_fitFontPercent);
       return true;
     }
-    // 走到这里说明：已经截到下限、或截断不再改变宽度 ⇒ 落到 ③ 缩字号
-  }
-
-  // ③ 候选已经很短（或已到截断下限）还是超预算：缩字号（下限 85%，不再往下缩）
-  const int kMinPercent = 85;
-  int next = (int)((long long)100 * budget / cx);
-  if (next < kMinPercent)
-    next = kMinPercent;
-  if (next >= 100)
-    return false;
-  if (_ApplyFitFontPercent(next)) {
-    _FitLog(cx, budget, 0, next);
-    return true;
+    // 走到这里说明：已经截到下限、或截断不再改变宽度 ⇒ 真的没辙了
   }
   return false;
 }
@@ -298,24 +354,31 @@ void WeaselPanel::_CreateLayout() {
   if (m_layout != NULL)
     delete m_layout;
 
+  // 换成一份改了 max_width 的样式副本：Layout 构造函数持有的是副本（_style(style)），
+  // 并在那里把 max_width 等按 DPI 放大，所以传局部变量是安全的，也不会污染 m_style。
+  UIStyle style = m_style;
+  if (m_fitWrapWidth > 0)
+    style.max_width = m_fitWrapWidth;
+
   Layout* layout = NULL;
-  if (m_style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT) {
-    layout = new VHorizontalLayout(m_style, m_ctx, m_status, pDWR);
+  if (style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT) {
+    layout = new VHorizontalLayout(style, m_ctx, m_status, pDWR);
   } else {
-    if (m_style.layout_type == UIStyle::LAYOUT_VERTICAL ||
-        m_style.layout_type == UIStyle::LAYOUT_VERTICAL_FULLSCREEN) {
-      layout = new VerticalLayout(m_style, m_ctx, m_status, pDWR);
-    } else if (m_style.layout_type == UIStyle::LAYOUT_HORIZONTAL ||
-               m_style.layout_type == UIStyle::LAYOUT_HORIZONTAL_FULLSCREEN) {
-      layout = new HorizontalLayout(m_style, m_ctx, m_status, pDWR);
+    if (style.layout_type == UIStyle::LAYOUT_VERTICAL ||
+        style.layout_type == UIStyle::LAYOUT_VERTICAL_FULLSCREEN) {
+      layout = new VerticalLayout(style, m_ctx, m_status, pDWR);
+    } else if (style.layout_type == UIStyle::LAYOUT_HORIZONTAL ||
+               style.layout_type == UIStyle::LAYOUT_HORIZONTAL_FULLSCREEN) {
+      layout = new HorizontalLayout(style, m_ctx, m_status, pDWR);
     }
 
-    if (IS_FULLSCREENLAYOUT(m_style)) {
-      layout = new FullScreenLayout(m_style, m_ctx, m_status, m_inputPos,
-                                    layout, pDWR);
+    if (IS_FULLSCREENLAYOUT(style)) {
+      layout = new FullScreenLayout(style, m_ctx, m_status, m_inputPos, layout,
+                                    pDWR);
     }
   }
   m_layout = layout;
+  m_layoutWrapWidth = m_fitWrapWidth;  // 记住这份布局是按哪个换行宽度建的
 }
 
 // 更新界面
@@ -370,6 +433,9 @@ void WeaselPanel::Refresh() {
       _InitFontRes();
       if (!pDWR)
         return;  // DirectWrite 资源不可用：本帧不建布局、不绘制
+      // 每帧先按皮肤自己的 max_width 排一次（量出真实宽度），别继承上一帧的换行宽度
+      m_fitWrapWidth = 0;
+      m_fitFontShrunkThisFrame = false;
       _CreateLayout();
 
       CDCHandle dc = GetDC();
@@ -383,6 +449,14 @@ void WeaselPanel::Refresh() {
       // 收敛靠 _FitToWorkAreaWidth 内部"每轮严格更短 + 到下限转缩字号"保证，
       // 不靠这个计数（旧实现的 4 次上界正是被不动点白烧掉的）。
       for (int guard = 0; guard < 8; guard++) {
+        // 换行宽度是在 Layout 构造时进入的（Layout 持有样式副本），所以它一变就
+        // 必须重建；_CreateLayout 会先 delete 旧布局。
+        if (m_layoutWrapWidth != m_fitWrapWidth)
+          _CreateLayout();
+        // 重建之后**仍然**要 DoLayout：构造函数只建对象，内容尺寸是 DoLayout 用
+        // DC 量出来的。漏掉这一步 GetContentSize() 保持 0，_ResizeWindow() 会把
+        // 窗口设成 0x0 —— 候选窗就此消失（真机 pos.log.5216：21 条 fit wrap
+        // 对应 21 帧 win=0x0）。
         m_layout->DoLayout(dc, pDWR);
         if (!_FitToWorkAreaWidth())
           break;

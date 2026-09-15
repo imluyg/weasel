@@ -172,6 +172,18 @@ class WeaselPanel
   // 上一轮 fit 结束时量到的行宽：本轮的 cx 没有变小就说明截断已经帮不上忙，
   // 直接转去缩字号，不必把迭代次数烧光
   int m_fitLastCx = 0;
+  // 候选行超预算时优先"换行"而不是截断显示文本（HorizontalLayout 会按
+  // style.max_width 折行，一个字都不丢）。两个值都是**逻辑像素**，Layout 构造时
+  // 再按 DPI 放大：
+  //   m_fitWrapWidth    本轮用的换行宽度；0 = 用皮肤自己的配置，-1 = 本轮放弃换行
+  //   m_layoutWrapWidth 当前 m_layout 是按哪个宽度建出来的（不同就必须重建）
+  int m_fitWrapWidth = 0;
+  int m_layoutWrapWidth = 0;
+  // 本帧是否已经缩过字号：① 的字号恢复用的是乐观估算（cx×103/pct），而实际宽度
+  // 受折行位置影响不是线性的，不拦住就会在同一帧里"恢复→又超→再缩"来回拉锯，
+  // 每次都重建 DirectWrite 字体资源（真机 pos.log.7368：一帧内 pct 在 98/100
+  // 之间跳 3~4 次，8 次迭代全烧完，最后还停在 98% 且超预算）。
+  bool m_fitFontShrunkThisFrame = false;
   // 隐藏期间被推迟的窗口位置（服务端面板）：SetWindowPos 对 topmost + layered
   // 窗口不免费，而每次位置上报都会走到这里。显示前用 EnsurePositionApplied 补上。
   int m_pendingX = 0;
