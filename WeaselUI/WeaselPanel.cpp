@@ -1690,17 +1690,40 @@ void WeaselPanel::_RepositionWindow(const bool& adj) {
     y = rcWorkArea.top;  // over workarea top
   // memorize adjusted position (to avoid window bouncing on height change)
   m_inputPos.bottom = y;
-  SetWindowPos(HWND_TOPMOST, x, y, 0, 0,
-               SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
+  // 隐藏的服务端面板（TSF 模式下它只是个 32x32 状态图标）没必要跟着光标挪：
+  // 把目标位置记下来，等真的一 Show 之前再用 EnsurePositionApplied 一次性应用。
+  // 记账（上面的 m_inputPos.bottom）照旧，所以可见时的行为完全不变；这样每次
+  // 位置上报就只剩"算位置 + 写日志"，省掉一次 SetWindowPos。
+  const bool defer = (m_in_server && !IsWindowVisible());
+  if (defer) {
+    m_pendingX = x;
+    m_pendingY = y;
+    m_posDirty = true;
+  } else {
+    _ApplyPosition(x, y);
+  }
   if (logging)
     log.Writef("[ui] repo adj=%d ip=%ld,%ld,%ld,%ld rawBottom=%ld win=%dx%d "
                "work=%ld,%ld,%ld,%ld -> x=%d y=%d flip=%d sticky=%d "
-               "istorepos=%d srv=%d",
+               "istorepos=%d srv=%d defer=%d",
                adj ? 1 : 0, m_inputPos.left, m_inputPos.top, m_inputPos.right,
                m_inputPos.bottom, raw_bottom, width, height, rcWorkArea.left,
                rcWorkArea.top, rcWorkArea.right, rcWorkArea.bottom, x, y,
                flipped ? 1 : 0, m_sticky ? 1 : 0, m_istorepos ? 1 : 0,
-               m_in_server ? 1 : 0);
+               m_in_server ? 1 : 0, defer ? 1 : 0);
+}
+
+void WeaselPanel::_ApplyPosition(int x, int y) {
+  SetWindowPos(HWND_TOPMOST, x, y, 0, 0,
+               SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
+  m_pendingX = x;
+  m_pendingY = y;
+  m_posDirty = false;
+}
+
+void WeaselPanel::EnsurePositionApplied() {
+  if (m_posDirty)
+    _ApplyPosition(m_pendingX, m_pendingY);
 }
 
 void WeaselPanel::_TextOut(const CRect& rc,

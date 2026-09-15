@@ -40,6 +40,9 @@ UINT_PTR UIImpl::timer = 0;
 void UIImpl::Show() {
   if (!panel.IsWindow())
     return;
+  // 隐藏期间 SetWindowPos 被推迟了（见 WeaselPanel::_RepositionWindow 的 defer），
+  // 必须先把位置补上再显示，否则会先出现在旧位置上再被下一次上报挪走。
+  panel.EnsurePositionApplied();
   panel.ShowWindow(SW_SHOWNA);
   shown = true;
   if (timer) {
@@ -63,6 +66,7 @@ void UIImpl::ShowWithTimeout(size_t millisec) {
   if (!panel.IsWindow())
     return;
   DLOG(INFO) << "ShowWithTimeout: " << millisec;
+  panel.EnsurePositionApplied();  // 同上：先补位置再显示
   panel.ShowWindow(SW_SHOWNA);
   shown = true;
   SetTimer(panel.m_hWnd, AUTOHIDE_TIMER, static_cast<UINT>(millisec),

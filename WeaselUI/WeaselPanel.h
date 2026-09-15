@@ -65,6 +65,9 @@ class WeaselPanel
 
   void MoveTo(RECT const& rc);
   void Refresh();
+  // 隐藏期间被推迟的 SetWindowPos 在"真正要显示"之前补应用（UI::Show /
+  // ShowWithTimeout 会先调它，再 ShowWindow）—— 见 _RepositionWindow 里的 defer。
+  void EnsurePositionApplied();
   void DoPaint(CDCHandle dc);
   bool GetIsReposition() { return m_istorepos; }
   void RedrawWindow();
@@ -98,6 +101,8 @@ class WeaselPanel
   void _FitLog(int cx, int budget, int trimChars, int percent);
   // 只有画出来有意义时才重绘（隐藏的服务端面板跳过）
   void _RedrawIfUseful();
+  // SetWindowPos 的实际执行点：立即用，或由 EnsurePositionApplied 补用
+  void _ApplyPosition(int x, int y);
   bool _DrawPreedit(const Text& text, CDCHandle dc, const CRect& rc);
   bool _DrawPreeditBack(const Text& text, CDCHandle dc, const CRect& rc);
   bool _DrawCandidates(CDCHandle& dc, bool back = false);
@@ -167,6 +172,11 @@ class WeaselPanel
   // 上一轮 fit 结束时量到的行宽：本轮的 cx 没有变小就说明截断已经帮不上忙，
   // 直接转去缩字号，不必把迭代次数烧光
   int m_fitLastCx = 0;
+  // 隐藏期间被推迟的窗口位置（服务端面板）：SetWindowPos 对 topmost + layered
+  // 窗口不免费，而每次位置上报都会走到这里。显示前用 EnsurePositionApplied 补上。
+  int m_pendingX = 0;
+  int m_pendingY = 0;
+  bool m_posDirty = false;
   // 本帧内"两点线性内插"用的试探点：上次截到的字数 → 当前量到的宽度就是那个点的宽度
   int m_fitTryLimit = -1;
   // for multi font_face & font_point
