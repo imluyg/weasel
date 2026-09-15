@@ -164,7 +164,9 @@ HRESULT WeaselTSF::_SetKeyboardOpen(BOOL fOpen) {
   com_ptr<ITfCompartmentMgr> pCompMgr;
 
   if (_pThreadMgr->QueryInterface(&pCompMgr) == S_OK) {
-    ITfCompartment* pCompartment;
+    // 用 com_ptr 管理：原来是裸 ITfCompartment*，取得引用后从不 Release
+    // （每次激活 + 每次输入法开/关切换泄漏一个 COM 对象）。
+    com_ptr<ITfCompartment> pCompartment;
     if (pCompMgr->GetCompartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
                                  &pCompartment) == S_OK) {
       VARIANT var;
@@ -181,7 +183,7 @@ HRESULT WeaselTSF::_GetCompartmentDWORD(DWORD& value, const GUID guid) {
   HRESULT hr = E_FAIL;
   com_ptr<ITfCompartmentMgr> pComMgr;
   if (_pThreadMgr->QueryInterface(&pComMgr) == S_OK) {
-    ITfCompartment* pCompartment;
+    com_ptr<ITfCompartment> pCompartment;
     if (pComMgr->GetCompartment(guid, &pCompartment) == S_OK) {
       VARIANT var;
       if (pCompartment->GetValue(&var) == S_OK) {
@@ -191,7 +193,6 @@ HRESULT WeaselTSF::_GetCompartmentDWORD(DWORD& value, const GUID guid) {
           hr = S_FALSE;
       }
     }
-    pCompartment->Release();
   }
   return hr;
 }
@@ -200,14 +201,13 @@ HRESULT WeaselTSF::_SetCompartmentDWORD(const DWORD& value, const GUID guid) {
   HRESULT hr = S_OK;
   com_ptr<ITfCompartmentMgr> pComMgr;
   if (_pThreadMgr->QueryInterface(&pComMgr) == S_OK) {
-    ITfCompartment* pCompartment;
+    com_ptr<ITfCompartment> pCompartment;
     if (pComMgr->GetCompartment(guid, &pCompartment) == S_OK) {
       VARIANT var;
       var.vt = VT_I4;
       var.lVal = value;
       hr = pCompartment->SetValue(_tfClientId, &var);
     }
-    pCompartment->Release();
   }
   return hr;
 }
