@@ -174,6 +174,8 @@ void WeaselPanel::Refresh() {
     // 这段跑在 IPC 管道线程上（持 g_api_mutex），省下的时间属于全部客户端。
     if (!m_layout || content_changed || style_changed) {
       _InitFontRes();
+      if (!pDWR)
+        return;  // DirectWrite 资源不可用：本帧不建布局、不绘制
       _CreateLayout();
 
       CDCHandle dc = GetDC();
@@ -199,9 +201,17 @@ void WeaselPanel::_InitFontRes(bool forced) {
   // resources
   if (forced || (pDWR == NULL) || (m_ostyle != m_style) || (dpiX != dpi)) {
     pDWR.reset();
-    pDWR = std::make_shared<DirectWriteResources>(m_style, dpiX);
-    pDWR->pRenderTarget->SetTextAntialiasMode(
-        (D2D1_TEXT_ANTIALIAS_MODE)m_style.antialias_mode);
+    try {
+      pDWR = std::make_shared<DirectWriteResources>(m_style, dpiX);
+      pDWR->pRenderTarget->SetTextAntialiasMode(
+          (D2D1_TEXT_ANTIALIAS_MODE)m_style.antialias_mode);
+    } catch (...) {
+      // DirectWrite/D2D 初始化失败的异常必须在这里就地收住：调用方
+      // （Refresh / DoPaint / _DrawCandidates / _DrawPreedit / _DrawPreeditBack）
+      // 靠 pDWR 判空降级为「本帧不绘制」。若让异常逃进 WM_CREATE / WM_PAINT，
+      // 宿主进程会直接崩溃（#1906），而这里只是没有 DirectWrite 资源。
+      pDWR.reset();
+    }
   }
   m_ostyle = m_style;
   dpi = dpiX;
@@ -742,6 +752,8 @@ bool WeaselPanel::_DrawPreeditBack(const Text& text,
                                    CDCHandle dc,
                                    const CRect& rc) {
   bool drawn = false;
+  if (!pDWR)
+    return false;
   std::wstring const& t = text.str;
   IDWriteTextFormat1* txtFormat = pDWR->pPreeditTextFormat.Get();
 
@@ -1007,6 +1019,10 @@ bool WeaselPanel::_DrawCandidates(CDCHandle& dc, bool back) {
 
 // draw client area
 void WeaselPanel::DoPaint(CDCHandle dc) {
+  // DirectWrite 资源或布局不可用时放弃本帧绘制，绝不空指针解引用。
+  // 绘制路径上没有异常出口（WM_PAINT 里抛异常会直接崩宿主），只能在这里降级。
+  if (!pDWR || !m_layout)
+    return;
   // turn off WS_EX_TRANSPARENT, for better resp performance
   ModifyStyleEx(WS_EX_TRANSPARENT, WS_EX_LAYERED);
   GetClientRect(&rcw);
