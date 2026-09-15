@@ -1348,6 +1348,25 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
 }
 
 void WeaselPanel::_DoPaintImpl(CDCHandle dc) {
+  // 帧内分段：DoPaint 只记 total，看不出这一帧是"DirectWrite 文本（_TextOut 每段
+  // 建一次布局）"、"_HighlightText 背景/阴影"还是"_LayerUpdate 整窗合成"占大头。
+  // 只在 WEASEL_PAINT_LOG 打开时多 5 次 QPC，不 flush，口径与 dopaint total= 一致。
+  weasel::perf::PerfLog& plog = weasel::perf::PerfLog::Instance();
+  const bool profiling = plog.enabled();
+  ULONGLONG pt[5] = {0, 0, 0, 0, 0};
+  ULONGLONG pt_end = 0;
+  if (profiling) {
+    pt[0] = weasel::perf::PerfLog::Now();
+    // 所有分段先指向起点：hide_candidates 的帧根本不进绘制块，若让它们保持 0 就会
+    // 算出天文数字的分段耗时（Ms(0, x) 是负数、Ms(x, 0) 是几十亿毫秒）。默认 0 表示
+    // "这段没有发生"。
+    for (int i = 1; i < 5; i++)
+      pt[i] = pt[0];
+    m_profLayoutMs = 0;
+    m_profDrawMs = 0;
+    m_profTextOut = 0;
+    m_profEndDrawMs = 0;
+  }
   // turn off WS_EX_TRANSPARENT, for better resp performance
   ModifyStyleEx(WS_EX_TRANSPARENT, WS_EX_LAYERED);
   GetClientRect(&rcw);
@@ -1428,6 +1447,8 @@ void WeaselPanel::_DoPaintImpl(CDCHandle dc) {
     if (m_candidateCount)
       drawn |= _DrawCandidates(memDC, true);
     // background and candidates back, hilite back drawing end
+    if (profiling)
+      pt[1] = weasel::perf::PerfLog::Now();
 
     // begin  texts drawing, if pRenderTarget failed, force to reinit
     // directwrite resources
@@ -1455,11 +1476,18 @@ void WeaselPanel::_DoPaintImpl(CDCHandle dc) {
     // draw candidates string
     if (m_candidateCount)
       drawn |= _DrawCandidates(memDC);
+    if (profiling)
+      pt_end = weasel::perf::PerfLog::Now();
     if (FAILED(pDWR->pRenderTarget->EndDraw())) {
       _InitFontRes(true);
       Refresh();
     }
+    if (profiling)
+      m_profEndDrawMs +=
+          weasel::perf::PerfLog::Ms(pt_end, weasel::perf::PerfLog::Now());
     // end texts drawing
+    if (profiling)
+      pt[2] = weasel::perf::PerfLog::Now();
 
     // status icon (I guess Metro IME stole my idea :)
     if (m_layout->ShouldDisplayStatusIcon()) {
@@ -1493,7 +1521,21 @@ void WeaselPanel::_DoPaintImpl(CDCHandle dc) {
     if (!drawn)
       ShowWindow(SW_HIDE);
   }
+  if (profiling)
+    pt[3] = weasel::perf::PerfLog::Now();
   _LayerUpdate(rcw, memDC);
+  if (profiling) {
+    pt[4] = weasel::perf::PerfLog::Now();
+    plog.Writef(
+        "[ui] paint back=%.3f text=%.3f end=%.3f lay=%.3f draw=%.3f nout=%d "
+        "icon=%.3f layer=%.3f total=%.3f cand=%d",
+        weasel::perf::PerfLog::Ms(pt[0], pt[1]),
+        weasel::perf::PerfLog::Ms(pt[1], pt[2]), m_profEndDrawMs,
+        m_profLayoutMs, m_profDrawMs, m_profTextOut,
+        weasel::perf::PerfLog::Ms(pt[2], pt[3]),
+        weasel::perf::PerfLog::Ms(pt[3], pt[4]),
+        weasel::perf::PerfLog::Ms(pt[0], pt[4]), (int)m_candidateCount);
+  }
 
   // 离屏 DC/位图是复用成员，不再在这里销毁（见 _ReleaseMemDC）
 }
@@ -1811,6 +1853,11 @@ void WeaselPanel::_TextOut(const CRect& rc,
   // 缺这一句就是空指针解引用 → 宿主进程崩溃（#1906 同族）。
   if (pDWR == NULL || pTextFormat == NULL)
     return;
+  // 文本段内部细分：CreateTextLayout（分析+字形映射）与 DrawTextLayoutAt 各占多少。
+  // 这两者与 EndDraw 谁是大头，决定了"缓存布局对象"到底值不值得做。
+  weasel::perf::PerfLog& plog = weasel::perf::PerfLog::Instance();
+  const bool profiling = plog.enabled();
+  const ULONGLONG t_layout = profiling ? weasel::perf::PerfLog::Now() : 0;
   float r = (float)(GetRValue(inColor)) / 255.0f;
   float g = (float)(GetGValue(inColor)) / 255.0f;
   float b = (float)(GetBValue(inColor)) / 255.0f;
@@ -1823,6 +1870,9 @@ void WeaselPanel::_TextOut(const CRect& rc,
 
   HR(pDWR->CreateTextLayout(psz.c_str(), (int)cch, pTextFormat,
                             (float)rc.Width(), (float)rc.Height()));
+  if (profiling)
+    m_profLayoutMs +=
+        weasel::perf::PerfLog::Ms(t_layout, weasel::perf::PerfLog::Now());
   if (pDWR->pTextLayout == NULL)
     return;  // 布局创建失败：不取度量也不绘制，否则下面的
              // GetLayoutOverhangMetrics 会解引用空指针（pTextLayout 为空）
@@ -1846,10 +1896,16 @@ void WeaselPanel::_TextOut(const CRect& rc,
     offsety += omt.top;
 
   if (pDWR->pTextLayout != NULL) {
+    const ULONGLONG t_draw = profiling ? weasel::perf::PerfLog::Now() : 0;
     pDWR->DrawTextLayoutAt({offsetx, offsety});
+    if (profiling)
+      m_profDrawMs +=
+          weasel::perf::PerfLog::Ms(t_draw, weasel::perf::PerfLog::Now());
 #if 0
     D2D1_RECT_F rectf =  D2D1::RectF(offsetx, offsety, offsetx + rc.Width(), offsety + rc.Height());
     pDWR->DrawRect(&rectf);
 #endif
   }
+  if (profiling)
+    m_profTextOut++;
 }

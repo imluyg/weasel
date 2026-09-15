@@ -396,7 +396,16 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
              << ", mask = " << keyEvent.mask << ", ipc_id = " << ipc_id;
   if (m_disabled)
     return FALSE;
+  // 分段打点：字母键 keydown p50 1.94ms / max 38.5ms 而 keyup 只有 p50 0.31ms
+  // （30 分钟基线），但 HandlePipeMessage 那条 [ipc] key= 只有总时长，看不出这
+  // 笔开销是花在 librime 的 process_key、_Respond（取 context/候选并组包）还是
+  // _UpdateUI（状态 + 服务端面板）上。这里把三段分开记，口径与 [ipc] key= 一致
+  // （都是本函数内部，不含管道往返）。只在打点开启时多 4 次 QPC。
+  weasel::perf::PosLog& klog = weasel::perf::PosLog::Instance();
+  const bool klogging = klog.enabled();
+  const ULONGLONG kt0 = klogging ? weasel::perf::PosLog::Now() : 0;
   RimeSessionId session_id = to_session_id(ipc_id);
+  const ULONGLONG kt1 = klogging ? weasel::perf::PosLog::Now() : 0;
   Bool handled = rime_api->process_key(session_id, keyEvent.keycode,
                                        expand_ibus_modifier(keyEvent.mask));
   // vim_mode when keydown only
@@ -413,9 +422,18 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
       rime_api->set_option(session_id, "ascii_mode", True);
     }
   }
+  const ULONGLONG kt2 = klogging ? weasel::perf::PosLog::Now() : 0;
   _Respond(ipc_id, eat);
+  const ULONGLONG kt3 = klogging ? weasel::perf::PosLog::Now() : 0;
   _UpdateUI(ipc_id);
+  const ULONGLONG kt4 = klogging ? weasel::perf::PosLog::Now() : 0;
   m_active_session = ipc_id;
+  if (klogging)
+    klog.Writef(
+        "[ipc] kseg key=%u mask=0x%x lookup=%.2f proc=%.2f resp=%.2f ui=%.2f",
+        (unsigned)keyEvent.keycode, (unsigned)keyEvent.mask,
+        weasel::perf::PosLog::Ms(kt0, kt1), weasel::perf::PosLog::Ms(kt1, kt2),
+        weasel::perf::PosLog::Ms(kt2, kt3), weasel::perf::PosLog::Ms(kt3, kt4));
   return (BOOL)handled;
 }
 

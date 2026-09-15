@@ -218,4 +218,10 @@ class WeaselPanel
   int m_memH = 0;
   bool m_memBound = false;  // 当前 DC 是否已 BindDC 到 pDWR 的 render target
   void _ReleaseMemDC();
+  // 绘制帧内文本路径的分段累计（只在 WEASEL_PAINT_LOG 打开时被写；每帧开始时清零）。
+  // 用来回答"_TextOut 那 8ms 到底是建布局、画字形还是 EndDraw"这个问题。
+  double m_profLayoutMs = 0;  // 本帧 CreateTextLayout 累计
+  double m_profDrawMs = 0;    // 本帧 DrawTextLayoutAt 累计
+  double m_profEndDrawMs = 0; // 本帧 EndDraw 累计
+  int m_profTextOut = 0;      // 本帧 _TextOut 调用次数
 };

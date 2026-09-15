@@ -137,6 +137,16 @@ class PerfLog : public EnvLog {
 //         有客户端拿一个服务端不认识的 ipc_id 来查会话（例如服务端重启后、
 //         或会话被回收后客户端还拿着旧 id）。这条以前是静默的 operator[]，
 //         会往会话表里插幽灵条目；现在只记录，不再插入。
+//   [ipc] kseg key=N mask=0x? lookup=.. proc=.. resp=.. ui=..
+//         PROCESS_KEY_EVENT 的函数内分段（毫秒）：lookup = to_session_id，
+//         proc = rime_api->process_key（含 vim_mode 分支），resp = _Respond，
+//         ui = _UpdateUI。总和≈[ipc] key= 的 ms。用来判断字母键 keydown 的
+//         1.9ms 到底花在 librime 还是服务端组包/UI 上。
+//   [ui]  paint back=.. text=.. icon=.. layer=.. total=.. cand=..
+//         绘制帧内分段（毫秒，PerfLog）：back = 背景/阴影/候选底（_HighlightText
+//         等），text = DirectWrite 文本（_DrawPreedit/_DrawCandidates 的 _TextOut），
+//         icon = 状态图标，layer = _LayerUpdate 整窗合成。total 与 dopaint 的
+//         total= 口径相同（都是 _DoPaintImpl 内部）。
 class PosLog : public EnvLog {
  public:
   static PosLog& Instance() {
