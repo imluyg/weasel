@@ -91,6 +91,8 @@ class WeaselPanel
   bool _FitToWorkAreaWidth();
   bool _ApplyFitFontPercent(int percent);
   void _FitLog(int cx, int budget, int trimChars, int percent);
+  // 只有画出来有意义时才重绘（隐藏的服务端面板跳过）
+  void _RedrawIfUseful();
   bool _DrawPreedit(const Text& text, CDCHandle dc, const CRect& rc);
   bool _DrawPreeditBack(const Text& text, CDCHandle dc, const CRect& rc);
   bool _DrawCandidates(CDCHandle& dc, bool back = false);

@@ -1454,6 +1454,23 @@ LRESULT WeaselPanel::OnDpiChanged(UINT uMsg,
   return LRESULT();
 }
 
+// 重绘请求：只有"画出来有意义"时才真画。
+// 服务端（WeaselServer 进程）那份面板平时是隐藏的 —— 它只在部署/方案提示时才
+// ShowWithTimeout。真机实测：每次 UPDATE_INPUT_POS 都会经 MoveTo 走到这里重绘一次
+// 32x32 的状态图标，服务端那条消息因此花掉 p50 2.54ms / p90 4.61ms / max 10.2ms
+// （406/406 个样本全部 ≥1ms），而客户端是同步等待这条消息的（_SendMessage），
+// 等于把这笔开销加在宿主按键路径上。隐藏时跳过绘制不动位置与内容，客户端面板
+// （m_in_server = false）行为完全不变。
+void WeaselPanel::_RedrawIfUseful() {
+  if (m_in_server && !IsWindowVisible()) {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[ui] redraw skipped (server panel hidden)");
+    return;
+  }
+  RedrawWindow();
+}
+
 void WeaselPanel::MoveTo(RECT const& rc) {
   weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
   const bool logging = log.enabled();
@@ -1492,7 +1509,7 @@ void WeaselPanel::MoveTo(RECT const& rc) {
     m_inputPos = rc;
     m_inputPos.OffsetRect(0, 6);
     _RepositionWindow(true);
-    RedrawWindow();
+    _RedrawIfUseful();
     return;
   }
   // if ascii_tip_follow_cursor set, move tip icon to mouse cursor
@@ -1510,7 +1527,7 @@ void WeaselPanel::MoveTo(RECT const& rc) {
     RECT irc{p.x - STATUS_ICON_SIZE, p.y - STATUS_ICON_SIZE, p.x, p.y};
     m_inputPos = irc;
     _RepositionWindow(true);
-    RedrawWindow();
+    _RedrawIfUseful();
   } else if (!(rc.left == m_inputPos.left && rc.bottom != m_inputPos.bottom &&
                abs(rc.bottom - m_inputPos.bottom) < 6) ||
              m_layout->ShouldDisplayStatusIcon()) {
@@ -1533,7 +1550,7 @@ void WeaselPanel::MoveTo(RECT const& rc) {
     // redrawing is required
     if (m_istorepos != m_istorepos_buf || !m_ctx.aux.empty() ||
         m_layout->ShouldDisplayStatusIcon() || m_redraw_by_monitor_change)
-      RedrawWindow();
+      _RedrawIfUseful();
   } else if (logging) {
     log.Writef("[ui] move rc=%ld,%ld,%ld,%ld ip=%ld,%ld,%ld,%ld sticky=%d "
                "reset=%d cand=%d pre=%u act=noop",
