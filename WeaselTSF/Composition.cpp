@@ -65,6 +65,22 @@ STDMETHODIMP CStartCompositionEditSession::DoEditSession(TfEditCookie ec) {
 
 void WeaselTSF::_StartComposition(com_ptr<ITfContext> pContext,
                                   BOOL fCUASWorkaroundEnabled) {
+  // B4 的位置去重缓存必须在这里失效，否则整场输入都停在第一次点击处。
+  //
+  // 合成结束时会用「提交后的光标位置」上报一次（日志里 [tsf] ext src=selection,
+  // [tsf] set ... comp=0），紧接着新合成的起点就是同一个坐标 ⇒ 新合成的第一次
+  // 上报被判成 dup 丢掉。由于合成期间该矩形本来就不变，这场合成之后再也不会有
+  // 任何 MoveTo：面板一直用上一次（甚至第一次）的 m_inputPos 贴在那儿。
+  // 真机 Obsidian 日志 pos.log.11144：5 次合成只有 1 次 MoveTo，光标从 x=1144
+  // 走到 1242（还换了一行），窗口始终停在 1144,452。
+  //
+  // 每次合成至少上报一次，合成内部的重复上报仍然由缓存挡掉。
+  _lastInputPosValid = FALSE;
+  {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[tsf] start -> pos cache invalidated");
+  }
   com_ptr<CStartCompositionEditSession> pStartCompositionEditSession;
   pStartCompositionEditSession.Attach(
       new CStartCompositionEditSession(this, pContext, fCUASWorkaroundEnabled));
@@ -261,7 +277,14 @@ void WeaselTSF::_SetCompositionPosition(const RECT& rc) {
   RECT _rc;
   _rc.left = _rc.right = rc.left;
   _rc.top = _rc.bottom = rc.bottom;
-  const bool dup = (_lastInputPosValid && ::EqualRect(&rc, &_lastInputPos));
+  // 只有「合成中」的上报才参与去重。合成结束的那次上报取的是提交后的光标位置
+  // （日志里 [tsf] ext src=selection、comp=0），它和紧接着的下一次合成的起点是
+  // 同一个坐标：若让它写进缓存，下一次合成的第一次上报就会被判成 dup 丢掉，
+  // 而合成期间该矩形又不变 ⇒ 那一整场输入都不会再有任何 MoveTo，候选窗停在上
+  // 一次（甚至第一次）的位置上。这类上报每次合成只多一次，不值得去重。
+  const bool composing = _IsComposing();
+  const bool dup =
+      (composing && _lastInputPosValid && ::EqualRect(&rc, &_lastInputPos));
   if (logging) {
     // 前台窗口矩形/类名用来判断 rc 是屏幕坐标还是窗口坐标，以及确认宿主。
     HWND fg = ::GetForegroundWindow();
@@ -276,15 +299,17 @@ void WeaselTSF::_SetCompositionPosition(const RECT& rc) {
         "enh=%d cuas=%d/%d fg=%ld,%ld,%ld,%ld cls=%s",
         rc.left, rc.top, rc.right, rc.bottom, dup ? 1 : 0, _lastInputPos.left,
         _lastInputPos.top, _lastInputPos.right, _lastInputPos.bottom,
-        _IsComposing() ? 1 : 0, _cand->style().enhanced_position ? 1 : 0,
+        composing ? 1 : 0, _cand->style().enhanced_position ? 1 : 0,
         _fCUASWorkaroundTested ? 1 : 0, _fCUASWorkaroundEnabled ? 1 : 0, fw.left,
         fw.top, fw.right, fw.bottom, cls);
   }
   if (dup) {
     return;  // 位置没变，不再走一次同步 IPC 往返
   }
-  _lastInputPos = rc;
-  _lastInputPosValid = TRUE;
+  if (composing) {
+    _lastInputPos = rc;
+    _lastInputPosValid = TRUE;
+  }
   m_client.UpdateInputPosition(rc);
   _cand->UpdateInputPosition(rc);
 }
