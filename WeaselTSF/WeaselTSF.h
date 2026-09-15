@@ -223,6 +223,9 @@ class WeaselTSF : public ITfTextInputProcessorEx,
 
   /* CUAS Candidate Window Position Workaround */
   BOOL _fCUASWorkaroundTested, _fCUASWorkaroundEnabled;
+  /* 上一次上报给服务端的输入位置，用于跳过重复 IPC */
+  RECT _lastInputPos = {0, 0, 0, 0};
+  BOOL _lastInputPosValid = FALSE;
 
   /* Weasel Related */
   weasel::Client m_client;

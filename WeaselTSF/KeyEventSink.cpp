@@ -63,6 +63,9 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
 }
 
 STDMETHODIMP WeaselTSF::OnSetFocus(BOOL fForeground) {
+  // 焦点切换后服务端是新的会话，位置不能沿用旧值比较（两个应用光标坐标
+  // 恰好相同时会漏发），让下一次上报必发。
+  _lastInputPosValid = FALSE;
   if (fForeground)
     m_client.FocusIn();
   else {

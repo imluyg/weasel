@@ -240,6 +240,11 @@ void WeaselTSF::_SetCompositionPosition(const RECT& rc) {
   RECT _rc;
   _rc.left = _rc.right = rc.left;
   _rc.top = _rc.bottom = rc.bottom;
+  if (_lastInputPosValid && ::EqualRect(&rc, &_lastInputPos)) {
+    return;  // 位置没变，不再走一次同步 IPC 往返
+  }
+  _lastInputPos = rc;
+  _lastInputPosValid = TRUE;
   m_client.UpdateInputPosition(rc);
   _cand->UpdateInputPosition(rc);
 }
