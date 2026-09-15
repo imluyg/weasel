@@ -118,8 +118,22 @@ HANDLE PipeChannelBase::_ConnectServerPipe(std::wstring& pn) {
       CreateNamedPipe(pn.c_str(), PIPE_ACCESS_DUPLEX,
                       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                       PIPE_UNLIMITED_INSTANCES, buff_size, buff_size, 0, sa);
-  if (pipe == INVALID_HANDLE_VALUE || !::ConnectNamedPipe(pipe, NULL)) {
+  if (pipe == INVALID_HANDLE_VALUE) {
     _ThrowLastError;
+  }
+  // ConnectNamedPipe 返回 FALSE 且 GetLastError()==ERROR_PIPE_CONNECTED 是**正常
+  // 成功**情形（客户端在 CreateNamedPipe 与 ConnectNamedPipe 之间抢先连上了，
+  // 见 MSDN：此时 client 与 server 之间是good connection）。原实现把它当失败，
+  // 于是：① 这条可用连接被丢弃（客户端 2s 后才超时）；② 抛异常时 handle 还没赋给
+  // 调用方的局部变量，WeaselServerImpl::Listen 的 _FinalizePipe 拿到的是
+  // INVALID_HANDLE_VALUE → 命名管道实例与 2×64KB 内核缓冲永久泄漏。
+  if (!::ConnectNamedPipe(pipe, NULL)) {
+    const DWORD err = ::GetLastError();
+    if (err != ERROR_PIPE_CONNECTED) {
+      ::CloseHandle(pipe);  // 真正的失败：由本函数负责关闭，不能留给调用方
+      ::SetLastError(err);
+      _ThrowLastError;
+    }
   }
   return pipe;
 }
