@@ -112,9 +112,20 @@ void WeaselPanel::_ResizeWindow() {
   ReleaseDC(dc);
 }
 
-// 让候选窗宽度不超过它所在显示器的工作区。做法是按住比例缩字号后重排：
-// 不丢候选文本（比截断好），窗口宽度收敛后 _RepositionWindow 的贴边夹取也就不
-// 会把它甩到屏幕最左边。缩到下限仍装不下就放弃，保持原样由夹取兜底（今天的行为）。
+// 让候选窗"别横跨整屏"。真机数据（横向布局 + 万象长句候选）：一行 8 个候选能到
+// 1934/1991px，而屏宽只有 1928px —— 于是 _RepositionWindow 的贴边夹取把它推到
+// x=115（光标在 x=1074），整块盖在下面两行文字上。
+//
+// 只把窗口压到"工作区以内"是不够的：1805px 的面板照样被夹到光标左边 960px。
+// 所以这里的目标是工作区的 2/3，手段按"信息损失从小到大"排序：
+//   ① 字号若是上一帧缩过的，内容变窄了就恢复配置字号；
+//   ② 截断候选**显示**文本（`style.candidate_abbreviate_length` 同一套语义：
+//      只影响面板显示与 ITfCandidateListUIElement::GetString，上屏内容由服务端
+//      commit 决定，不受影响），保留至少 6 字 + "..."；
+//   ③ 候选已经到截断下限还超预算，才缩字号（下限 85%）。
+// 同帧内只朝一个方向走（缩小），绝不放大 → 不会出现"窗口 1805 而字模 1934"
+// 那种尺寸/字模不一致（那会把最右边的候选裁掉）。
+// 返回 true = 已改动，调用方需要重新 DoLayout。
 bool WeaselPanel::_FitToWorkAreaWidth() {
   if (!pDWR || !m_layout || m_ctx.empty())
     return false;
@@ -128,34 +139,77 @@ bool WeaselPanel::_FitToWorkAreaWidth() {
   }
   if (workArea.IsRectEmpty())
     return false;
-  // 留几像素余量给圆角/阴影，避免"刚好等于工作区宽"时又被夹一次。
-  const int avail = workArea.Width() - 8;
+  const int avail = workArea.Width() - 8;  // 圆角/阴影余量
+  const int budget = avail * 2 / 3;        // 目标：工作区的 2/3
   const int cx = m_layout->GetContentSize().cx;
-  if (cx <= 0 || avail <= 0)
+  if (cx <= 0 || budget <= 0)
     return false;
 
-  const int kMinPercent = 55;  // 字号下限：配置值的 55%
-  const int kMinPoint = 8;     // 以及绝对下限 8pt
-  int percent = m_fitFontPercent;
-  if (cx > avail) {
-    // 需要更小：按 cx 超出的比例缩（宽度大致与字号线性），目标留 2% 余量，
-    // 因为窗口里还有不随字号缩放的部分（标签间距、圆角等），缩一次常常刚好差几像素。
-    const int target = avail * 98 / 100;
-    int next = (int)((long long)percent * target / cx);
-    if (next >= percent)
-      next = percent - 3;
-    if (next < kMinPercent)
-      next = kMinPercent;
-    if (next >= percent)
-      return false;  // 已到下限，放弃
-    percent = next;
-  } else if (cx <= avail * 97 / 100 && percent < 100) {
-    // 有明显余量：先试着回到皮肤配置的字号（装不下下一轮会再缩回来）
-    percent = 100;
-  } else {
-    return false;  // 落在 [97%, 100%]：收敛，不再动
+  // ① 字号恢复：缩过字号、而按估算复原后仍能装进预算，就回到配置字号。
+  //    估算偏乐观时下一帧会再缩回去（幅度很小，不会来回抖）。
+  if (m_fitFontPercent < 100) {
+    const long long fullEst =
+        (long long)cx * 100 * 103 / (m_fitFontPercent * 100);
+    if (fullEst <= budget) {
+      if (_ApplyFitFontPercent(100)) {
+        _FitLog(cx, budget, 0, 100);
+        return true;
+      }
+      return false;
+    }
+    return false;  // 还得保持缩过的字号：本帧不动
+  }
+  if (cx <= budget)
+    return false;  // 收敛
+
+  // ② 截断候选显示文本
+  size_t maxLen = 0;
+  for (const auto& c : m_ctx.cinfo.candies)
+    if (c.str.size() > maxLen)
+      maxLen = c.str.size();
+  const int kMinChars = 6;
+  if (maxLen > (size_t)kMinChars) {
+    // 用"上一点"做两点线性内插（宽度 ≈ 固定开销 + k×字数），通常一两轮就到位；
+    // 没有上一点时退化成按比例估。
+    int limit;
+    if (m_fitTryLimit > 0 && m_fitTryCx > cx && m_fitTryLimit > (int)maxLen) {
+      const double slope = (double)(m_fitTryCx - cx) /
+                           (double)(m_fitTryLimit - (int)maxLen);
+      const double fixed = cx - slope * (int)maxLen;
+      limit = slope > 0.0 ? (int)((budget - fixed) / slope) : (int)maxLen;
+    } else {
+      limit = (int)((long long)maxLen * budget / cx);
+    }
+    if (limit < kMinChars)
+      limit = kMinChars;
+    if (limit < (int)maxLen) {
+      m_fitTryLimit = limit;
+      m_fitTryCx = cx;
+      for (auto& c : m_ctx.cinfo.candies) {
+        if (c.str.size() > (size_t)limit)
+          c.str = c.str.substr(0, limit - 1) + L"...";
+      }
+      _FitLog(cx, budget, limit, 100);
+      return true;
+    }
   }
 
+  // ③ 候选已经很短还是超预算：缩字号（下限 85%，不再往下缩）
+  const int kMinPercent = 85;
+  int next = (int)((long long)100 * budget / cx);
+  if (next < kMinPercent)
+    next = kMinPercent;
+  if (next >= 100)
+    return false;
+  if (_ApplyFitFontPercent(next)) {
+    _FitLog(cx, budget, 0, next);
+    return true;
+  }
+  return false;
+}
+
+bool WeaselPanel::_ApplyFitFontPercent(int percent) {
+  const int kMinPoint = 8;  // 绝对下限：再小也没法看
   const int labelPoint = m_style.label_font_point * percent / 100;
   int point = m_style.font_point * percent / 100;
   const int commentPoint = m_style.comment_font_point * percent / 100;
@@ -178,13 +232,14 @@ bool WeaselPanel::_FitToWorkAreaWidth() {
     return false;
   }
   m_fitFontPercent = percent;
-  {
-    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
-    if (log.enabled())
-      log.Writef("[ui] fit cx=%d avail=%d pct=%d pt=%d", cx, avail, percent,
-                 point);
-  }
   return true;
+}
+
+void WeaselPanel::_FitLog(int cx, int budget, int trimChars, int percent) {
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  if (log.enabled())
+    log.Writef("[ui] fit cx=%d budget=%d trim=%d pct=%d", cx, budget, trimChars,
+               percent);
 }
 
 void WeaselPanel::_CreateLayout() {
@@ -266,10 +321,11 @@ void WeaselPanel::Refresh() {
       _CreateLayout();
 
       CDCHandle dc = GetDC();
-      // 候选行比工作区还宽时按比例缩字号重排，直到装下或到下限。真机上（横向
-      // 布局 + 万象长句候选）见过 1934/1991px 的窗口 vs 1928px 屏宽：窗口随后被
-      // _RepositionWindow 的贴边夹取推到 x=0/左侧，位置对但盖住大片文字。
-      // 缩字号不丢任何候选文本，等于把"最宽"换成"略小"。
+      // 候选行比预算宽时截断显示文本 / 缩字号重排，直到收敛或到下限。真机上
+      // （横向布局 + 万象长句候选）见过 1934/1991px 的窗口 vs 1928px 屏宽：窗口
+      // 随后被 _RepositionWindow 的贴边夹取推到光标左边近千像素，盖住整行文字。
+      m_fitTryLimit = -1;
+      m_fitTryCx = 0;
       for (int guard = 0; guard < 4; guard++) {
         m_layout->DoLayout(dc, pDWR);
         if (!_FitToWorkAreaWidth())
