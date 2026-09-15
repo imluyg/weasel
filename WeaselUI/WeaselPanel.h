@@ -79,6 +79,7 @@ class WeaselPanel
     return (int)(t * dpiScaleLayout);
   }
   void _InitFontRes(bool forced = false);
+  void _DoPaintImpl(CDCHandle dc);  // DoPaint 的实际实现，由 DoPaint 包异常边界
   void _CaptureRect(CRect& rect);
   bool m_mouse_entry = false;
   CPoint m_lastMousePos = {-1, -1};

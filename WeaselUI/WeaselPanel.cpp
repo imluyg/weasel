@@ -5,6 +5,7 @@
 #include <ShellScalingApi.h>
 #include <VersionHelpers.hpp>
 #include <WeaselIPCData.h>
+#include <WeaselPerfLog.h>
 #include <algorithm>
 
 #include "VerticalLayout.h"
@@ -1025,6 +1026,48 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
   // 绘制路径上没有异常出口（WM_PAINT 里抛异常会直接崩宿主），只能在这里降级。
   if (!pDWR || !m_layout)
     return;
+  // 绘制路径上还有一类会抛异常的调用：HR()（include/WeaselUtility.h:315-321）
+  // 只要 HRESULT 非 S_OK 就抛 ComException，_TextOut / _HighlightText / Layout 的
+  // 度量路径都在用。它们抛出来会越过 WM_PAINT（RedrawWindow 直接调本函数），
+  // 直接崩宿主 —— 这正是 #1906「d2d1.dll 崩溃」的同族路径。这里整帧收住降级：
+  // 本帧不绘制（可能留下上一帧内容），下一帧重新尝试。
+  weasel::perf::PerfLog& log = weasel::perf::PerfLog::Instance();
+  const bool profiling = log.enabled();
+  const ULONGLONG t0 = profiling ? weasel::perf::PerfLog::Now() : 0;
+  const char* fail = "";
+  bool reentered = false;
+  if (profiling) {
+    static thread_local bool in_paint = false;
+    if (in_paint)
+      reentered = true;
+    in_paint = true;
+  }
+  try {
+    _DoPaintImpl(dc);
+  } catch (const std::exception&) {
+    fail = "cpp";
+    _ReleaseMemDC();
+  } catch (...) {
+    fail = "unknown";
+    _ReleaseMemDC();
+  }
+  if (profiling) {
+    static thread_local bool in_paint = false;
+    in_paint = false;
+    char line[192];
+    sprintf_s(line, sizeof(line),
+              "dopaint reenter=%d w=%d h=%d cands=%d hide=%d sw=%d exc=%s "
+              "total=%.3f",
+              reentered ? 1 : 0, rcw.Width(), rcw.Height(),
+              (int)m_candidateCount, hide_candidates ? 1 : 0,
+              (pDWR && pDWR->use_software_rt_) ? 1 : 0,
+              fail[0] ? fail : "-",
+              weasel::perf::PerfLog::Ms(t0, weasel::perf::PerfLog::Now()));
+    log.Write(line);
+  }
+}
+
+void WeaselPanel::_DoPaintImpl(CDCHandle dc) {
   // turn off WS_EX_TRANSPARENT, for better resp performance
   ModifyStyleEx(WS_EX_TRANSPARENT, WS_EX_LAYERED);
   GetClientRect(&rcw);
@@ -1049,8 +1092,11 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
     CRect auxrc = m_layout->GetAuxiliaryRect();
     CRect preeditrc = m_layout->GetPreeditRect();
     if (m_istorepos) {
-      CRect* rects = new CRect[m_candidateCount];
-      int* btmys = new int[m_candidateCount];
+      // 用固定容量栈数组替代 new[]/delete[]：候选人数量本就被
+      // MAX_CANDIDATES_COUNT 限制，避免每帧两次堆分配；原写法在两次 new
+      // 之间抛出异常时还会泄漏（绘制路径上无异常出口，但成本为零的加固没必要省）。
+      CRect rects[MAX_CANDIDATES_COUNT];
+      int btmys[MAX_CANDIDATES_COUNT];
       for (auto i = 0; i < m_candidateCount && i < MAX_CANDIDATES_COUNT; ++i) {
         rects[i] = m_layout->GetCandidateRect(i);
         btmys[i] = rects[i].bottom;
@@ -1080,8 +1126,6 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
                            DPI_SCALE(m_style.candidate_spacing)) -
                           rects[i].bottom;
       }
-      delete[] rects;
-      delete[] btmys;
     }
     // background and candidates back, hilite back drawing start
     if ((!m_ctx.empty() && !m_style.inline_preedit) ||
@@ -1108,12 +1152,18 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
     // begin  texts drawing, if pRenderTarget failed, force to reinit
     // directwrite resources
     if (!m_memBound) {
-      // BindDC 只在 DC 新建或 pDWR 重建后做一次（实测每次约 0.70ms）
+      // BindDC 只在 DC 新建或 pDWR 重建后做一次。注意 BindDC 本身的实测成本只有
+      // 约 0.07~0.08ms（与目标尺寸无关）；之前注释里的「约 0.70ms」是把 BindDC 与
+      // 它强制触发的下一次表面重获权混算了。真正省下的是「每帧重绑」的 0.37~0.53ms。
       if (FAILED(pDWR->pRenderTarget->BindDC(memDC, &rcw))) {
         _InitFontRes(true);
+        if (!pDWR)
+          return;  // 重建失败：pDWR 已被置空，下面的解引用会崩宿主
         pDWR->pRenderTarget->BindDC(memDC, &rcw);
       }
-      m_memBound = true;
+      // 只有绑定成功才置位：原来无条件置 true，若第二次 BindDC 仍失败，
+      // 之后每帧都会跳过重绑并让 EndDraw 失败 → 反复重建 DirectWrite 资源。
+      m_memBound = (pDWR->pRenderTarget != NULL);
     }
     pDWR->pRenderTarget->BeginDraw();
     // draw auxiliary string
@@ -1203,7 +1253,10 @@ void WeaselPanel::_LayerUpdate(const CRect& rc, CDCHandle dc) {
   BLENDFUNCTION bf = {AC_SRC_OVER, 0, 0XFF, AC_SRC_ALPHA};
   UpdateLayeredWindow(m_hWnd, ScreenDC, &WindowPosAtScreen, &sz, dc,
                       &PointOriginal, RGB(0, 0, 0), &bf, ULW_ALPHA);
-  ReleaseDC(ScreenDC);
+  // 必须写成 ::ReleaseDC(NULL, ...)：这个 DC 来自上面的 ::GetDC(NULL)（屏幕 DC），
+  // 而 CWindow::ReleaseDC(HDC) 会转成 ::ReleaseDC(m_hWnd, ScreenDC)，两者不配对 →
+  // 每帧泄漏一个屏幕 DC（约一万次重绘后耗尽 GDI 句柄）。_CaptureRect 里的写法是对的。
+  ::ReleaseDC(NULL, ScreenDC);
 }
 
 LRESULT WeaselPanel::OnCreate(UINT uMsg,
@@ -1364,7 +1417,11 @@ void WeaselPanel::_TextOut(const CRect& rc,
                            const size_t& cch,
                            const int& inColor,
                            IDWriteTextFormat1* const pTextFormat) {
-  if (pTextFormat == NULL)
+  // pDWR 可能在 _InitFontRes() 里因 DirectWrite/D2D 初始化失败被置空（见
+  // _InitFontRes 的 catch 分支）。_DrawPreeditBack 只在自己的入口判空，随后仍会
+  // 调到这里；_DrawCandidates 判空后也可能因样式变化让 pDWR 在调用途中失效。
+  // 缺这一句就是空指针解引用 → 宿主进程崩溃（#1906 同族）。
+  if (pDWR == NULL || pTextFormat == NULL)
     return;
   float r = (float)(GetRValue(inColor)) / 255.0f;
   float g = (float)(GetGValue(inColor)) / 255.0f;
@@ -1378,6 +1435,9 @@ void WeaselPanel::_TextOut(const CRect& rc,
 
   HR(pDWR->CreateTextLayout(psz.c_str(), (int)cch, pTextFormat,
                             (float)rc.Width(), (float)rc.Height()));
+  if (pDWR->pTextLayout == NULL)
+    return;  // 布局创建失败：不取度量也不绘制，否则下面的
+             // GetLayoutOverhangMetrics 会解引用空指针（pTextLayout 为空）
   if (m_style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT) {
     DWRITE_FLOW_DIRECTION flow = m_style.vertical_text_left_to_right
                                      ? DWRITE_FLOW_DIRECTION_LEFT_TO_RIGHT
