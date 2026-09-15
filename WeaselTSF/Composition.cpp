@@ -3,6 +3,7 @@
 #include "EditSession.h"
 #include "ResponseParser.h"
 #include "CandidateList.h"
+#include <WeaselPerfLog.h>
 
 /* Start Composition */
 class CStartCompositionEditSession : public CEditSession {
@@ -53,6 +54,9 @@ STDMETHODIMP CStartCompositionEditSession::DoEditSession(TfEditCookie ec) {
     // The old composition's range is still visible while its asynchronous
     // end session is pending. Position only after the new composition has
     // actually been created, not from the response handler's stale range.
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[tsf] start");
     _pTextService->_UpdateCompositionWindow(_pContext);
   }
 
@@ -123,6 +127,9 @@ void WeaselTSF::_EndComposition(com_ptr<ITfContext> pContext,
   HRESULT hr;
   com_ptr<ITfComposition> pComposition = _pComposition;
 
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  if (log.enabled())
+    log.Writef("[tsf] end clear=%d endUI=%d", clear ? 1 : 0, endUI ? 1 : 0);
   if (endUI)
     _cand->EndUI();
   if ((pEditSession = new CEndCompositionEditSession(
@@ -204,7 +211,16 @@ STDMETHODIMP CGetTextExtentEditSession::DoEditSession(TfEditCookie ec) {
         rc.bottom += offsety;
       }
     }
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[tsf] ext rc=%ld,%ld,%ld,%ld clipped=%d src=%s", rc.left,
+                 rc.top, rc.right, rc.bottom, fClipped ? 1 : 0,
+                 (_pComposition != nullptr) ? "comp-start" : "selection");
     _pTextService->_SetCompositionPosition(rc);
+  } else {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[tsf] ext rejected left=%ld top=%ld", rc.left, rc.top);
   }
   return S_OK;
 }
@@ -230,17 +246,41 @@ BOOL WeaselTSF::_UpdateCompositionWindow(com_ptr<ITfContext> pContext) {
 void WeaselTSF::_SetCompositionPosition(const RECT& rc) {
   /* Test if rect is valid.
    * If it is invalid during CUAS test, we need to apply CUAS workaround */
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  const bool logging = log.enabled();
   if (!_fCUASWorkaroundTested) {
     _fCUASWorkaroundTested = TRUE;
     if (rc.top == rc.bottom) {
       _fCUASWorkaroundEnabled = TRUE;
+      if (logging)
+        log.Writef("[tsf] set rc=%ld,%ld,%ld,%ld act=cuas-return", rc.left,
+                   rc.top, rc.right, rc.bottom);
       return;
     }
   }
   RECT _rc;
   _rc.left = _rc.right = rc.left;
   _rc.top = _rc.bottom = rc.bottom;
-  if (_lastInputPosValid && ::EqualRect(&rc, &_lastInputPos)) {
+  const bool dup = (_lastInputPosValid && ::EqualRect(&rc, &_lastInputPos));
+  if (logging) {
+    // 前台窗口矩形/类名用来判断 rc 是屏幕坐标还是窗口坐标，以及确认宿主。
+    HWND fg = ::GetForegroundWindow();
+    RECT fw = {0, 0, 0, 0};
+    char cls[80] = {0};
+    if (fg) {
+      ::GetWindowRect(fg, &fw);
+      ::GetClassNameA(fg, cls, sizeof(cls) - 1);
+    }
+    log.Writef(
+        "[tsf] set rc=%ld,%ld,%ld,%ld dup=%d prev=%ld,%ld,%ld,%ld comp=%d "
+        "enh=%d cuas=%d/%d fg=%ld,%ld,%ld,%ld cls=%s",
+        rc.left, rc.top, rc.right, rc.bottom, dup ? 1 : 0, _lastInputPos.left,
+        _lastInputPos.top, _lastInputPos.right, _lastInputPos.bottom,
+        _IsComposing() ? 1 : 0, _cand->style().enhanced_position ? 1 : 0,
+        _fCUASWorkaroundTested ? 1 : 0, _fCUASWorkaroundEnabled ? 1 : 0, fw.left,
+        fw.top, fw.right, fw.bottom, cls);
+  }
+  if (dup) {
     return;  // 位置没变，不再走一次同步 IPC 往返
   }
   _lastInputPos = rc;
@@ -419,6 +459,10 @@ STDMETHODIMP WeaselTSF::OnCompositionTerminated(TfEditCookie ecWrite,
 }
 
 void WeaselTSF::_AbortComposition(bool clear) {
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  if (log.enabled())
+    log.Writef("[tsf] abort clear=%d composing=%d", clear ? 1 : 0,
+               _IsComposing() ? 1 : 0);
   m_client.ClearComposition();
   if (_IsComposing()) {
     _EndComposition(_pEditSessionContext, clear);

@@ -172,9 +172,19 @@ void WeaselPanel::Refresh() {
   if (!hide_candidates || inline_no_candidates) {
     const bool content_changed = (m_ctx != m_octx);
     const bool style_changed = (m_ostyle != m_style);  // 必须在 _InitFontRes() 之前取
+    const bool rebuild = (!m_layout || content_changed || style_changed);
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[ui] refresh changed=%d style=%d rebuild=%d hide=%d cand=%d "
+                 "pre=%u sticky=%d ip=%ld,%ld,%ld,%ld srv=%d",
+                 content_changed ? 1 : 0, style_changed ? 1 : 0, rebuild ? 1 : 0,
+                 hide_candidates ? 1 : 0, (int)m_candidateCount,
+                 (unsigned)m_ctx.preedit.str.size(), m_sticky ? 1 : 0,
+                 m_inputPos.left, m_inputPos.top, m_inputPos.right,
+                 m_inputPos.bottom, m_in_server ? 1 : 0);
     // 内容与样式都没变时不必重建 Layout、不必重算布局。
     // 这段跑在 IPC 管道线程上（持 g_api_mutex），省下的时间属于全部客户端。
-    if (!m_layout || content_changed || style_changed) {
+    if (rebuild) {
       _InitFontRes();
       if (!pDWR)
         return;  // DirectWrite 资源不可用：本帧不建布局、不绘制
@@ -1265,6 +1275,13 @@ LRESULT WeaselPanel::OnCreate(UINT uMsg,
                               BOOL& bHandled) {
   m_mouse_entry = false;
   m_hoverIndex = -1;
+  {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[ui] create ip=%ld,%ld,%ld,%ld sticky=%d srv=%d",
+                 m_inputPos.left, m_inputPos.top, m_inputPos.right,
+                 m_inputPos.bottom, m_sticky ? 1 : 0, m_in_server ? 1 : 0);
+  }
   Refresh();
   return TRUE;
 }
@@ -1273,6 +1290,13 @@ LRESULT WeaselPanel::OnDestroy(UINT uMsg,
                                WPARAM wParam,
                                LPARAM lParam,
                                BOOL& bHandled) {
+  {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[ui] destroy ip=%ld,%ld,%ld,%ld sticky=%d",
+                 m_inputPos.left, m_inputPos.top, m_inputPos.right,
+                 m_inputPos.bottom, m_sticky ? 1 : 0);
+  }
   m_hoverIndex = -1;
   m_lastMousePos = {-1, -1};
   m_sticky = false;
@@ -1291,8 +1315,22 @@ LRESULT WeaselPanel::OnDpiChanged(UINT uMsg,
 }
 
 void WeaselPanel::MoveTo(RECT const& rc) {
-  if (!m_layout)
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  const bool logging = log.enabled();
+  if (!m_layout) {
+    if (logging)
+      log.Writef("[ui] move rc=%ld,%ld,%ld,%ld ip=%ld,%ld,%ld,%ld sticky=%d "
+                 "cand=%d pre=%u act=noLayout",
+                 rc.left, rc.top, rc.right, rc.bottom, m_inputPos.left,
+                 m_inputPos.top, m_inputPos.right, m_inputPos.bottom,
+                 m_sticky ? 1 : 0, (int)m_candidateCount,
+                 (unsigned)m_ctx.preedit.str.size());
     return;  // avoid handling nullptr in _RepositionWindow
+  }
+  const LONG ip_left = m_inputPos.left;
+  const LONG ip_bottom = m_inputPos.bottom;
+  const bool ip_empty = (m_inputPos.left == 0 && m_inputPos.top == 0 &&
+                         m_inputPos.right == 0 && m_inputPos.bottom == 0);
   m_redraw_by_monitor_change = false;
   // The conditions for resetting the sticky state:
   // 1. When the input session ends (ctx.empty() is true)
@@ -1303,6 +1341,12 @@ void WeaselPanel::MoveTo(RECT const& rc) {
       (m_ctx.empty() || (abs(rc.left - m_inputPos.left) > 50) ||
        (abs(rc.bottom - m_inputPos.bottom) > 50));
   if (should_reset_sticky && m_sticky) {
+    if (logging)
+      log.Writef("[ui] move rc=%ld,%ld,%ld,%ld ip=%ld,%ld,%ld,%ld sticky=1 "
+                 "reset=1 ipEmpty=%d cand=%d pre=%u act=resetSticky",
+                 rc.left, rc.top, rc.right, rc.bottom, ip_left, m_inputPos.top,
+                 m_inputPos.right, ip_bottom, ip_empty ? 1 : 0,
+                 (int)m_candidateCount, (unsigned)m_ctx.preedit.str.size());
     m_sticky = false;
     // Force reposition the window
     m_inputPos = rc;
@@ -1314,6 +1358,12 @@ void WeaselPanel::MoveTo(RECT const& rc) {
   // if ascii_tip_follow_cursor set, move tip icon to mouse cursor
   if (m_style.ascii_tip_follow_cursor && m_ctx.empty() &&
       (!m_status.composing) && m_layout->ShouldDisplayStatusIcon()) {
+    if (logging)
+      log.Writef("[ui] move rc=%ld,%ld,%ld,%ld ip=%ld,%ld,%ld,%ld sticky=%d "
+                 "reset=%d act=tip",
+                 rc.left, rc.top, rc.right, rc.bottom, ip_left, m_inputPos.top,
+                 m_inputPos.right, ip_bottom, m_sticky ? 1 : 0,
+                 should_reset_sticky ? 1 : 0);
     // ascii icon follow cursor
     POINT p;
     ::GetCursorPos(&p);
@@ -1324,6 +1374,13 @@ void WeaselPanel::MoveTo(RECT const& rc) {
   } else if (!(rc.left == m_inputPos.left && rc.bottom != m_inputPos.bottom &&
                abs(rc.bottom - m_inputPos.bottom) < 6) ||
              m_layout->ShouldDisplayStatusIcon()) {
+    if (logging)
+      log.Writef("[ui] move rc=%ld,%ld,%ld,%ld ip=%ld,%ld,%ld,%ld sticky=%d "
+                 "reset=%d ipEmpty=%d cand=%d pre=%u act=move",
+                 rc.left, rc.top, rc.right, rc.bottom, ip_left, m_inputPos.top,
+                 m_inputPos.right, ip_bottom, m_sticky ? 1 : 0,
+                 should_reset_sticky ? 1 : 0, ip_empty ? 1 : 0,
+                 (int)m_candidateCount, (unsigned)m_ctx.preedit.str.size());
     // in some apps like word 2021, with inline_preedit set,
     // bottom of rc would flicker 1 px or 2, make the candidate flickering
     m_inputPos = rc;
@@ -1337,10 +1394,20 @@ void WeaselPanel::MoveTo(RECT const& rc) {
     if (m_istorepos != m_istorepos_buf || !m_ctx.aux.empty() ||
         m_layout->ShouldDisplayStatusIcon() || m_redraw_by_monitor_change)
       RedrawWindow();
+  } else if (logging) {
+    log.Writef("[ui] move rc=%ld,%ld,%ld,%ld ip=%ld,%ld,%ld,%ld sticky=%d "
+               "reset=%d cand=%d pre=%u act=noop",
+               rc.left, rc.top, rc.right, rc.bottom, ip_left, m_inputPos.top,
+               m_inputPos.right, ip_bottom, m_sticky ? 1 : 0,
+               should_reset_sticky ? 1 : 0, (int)m_candidateCount,
+               (unsigned)m_ctx.preedit.str.size());
   }
 }
 
 void WeaselPanel::_RepositionWindow(const bool& adj) {
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  const bool logging = log.enabled();
+  const LONG raw_bottom = m_inputPos.bottom;
   RECT rcWorkArea;
   memset(&rcWorkArea, 0, sizeof(rcWorkArea));
   HMONITOR hMonitor = MonitorFromRect(m_inputPos, MONITOR_DEFAULTTONEAREST);
@@ -1364,6 +1431,7 @@ void WeaselPanel::_RepositionWindow(const bool& adj) {
   rcWorkArea.bottom -= height;
   int x = m_inputPos.left;
   int y = m_inputPos.bottom;
+  bool flipped = false;
   if (DPI_SCALE(m_style.shadow_radius)) {
     x -= (DPI_SCALE(m_style.shadow_offset_x) >= 0 ||
           COLORTRANSPARENT(m_style.shadow_color))
@@ -1390,6 +1458,7 @@ void WeaselPanel::_RepositionWindow(const bool& adj) {
     x = rcWorkArea.left;  // over workarea left
   // show panel above the input focus if we're around the bottom
   if (y > rcWorkArea.bottom || m_sticky) {
+    flipped = true;
     if (!m_sticky)
       m_sticky = true;
     y = m_inputPos.top - height - 6;  // over workarea bottom
@@ -1410,6 +1479,15 @@ void WeaselPanel::_RepositionWindow(const bool& adj) {
   m_inputPos.bottom = y;
   SetWindowPos(HWND_TOPMOST, x, y, 0, 0,
                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
+  if (logging)
+    log.Writef("[ui] repo adj=%d ip=%ld,%ld,%ld,%ld rawBottom=%ld win=%dx%d "
+               "work=%ld,%ld,%ld,%ld -> x=%d y=%d flip=%d sticky=%d "
+               "istorepos=%d srv=%d",
+               adj ? 1 : 0, m_inputPos.left, m_inputPos.top, m_inputPos.right,
+               m_inputPos.bottom, raw_bottom, width, height, rcWorkArea.left,
+               rcWorkArea.top, rcWorkArea.right, rcWorkArea.bottom, x, y,
+               flipped ? 1 : 0, m_sticky ? 1 : 0, m_istorepos ? 1 : 0,
+               m_in_server ? 1 : 0);
 }
 
 void WeaselPanel::_TextOut(const CRect& rc,

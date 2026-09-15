@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include <WeaselUI.h>
+#include <WeaselPerfLog.h>
 #include "WeaselPanel.h"
 
 using namespace weasel;
@@ -158,6 +159,14 @@ void UI::Refresh() {
 void UI::UpdateInputPosition(RECT const& rc) {
   if (pimpl_ && pimpl_->panel.IsWindow()) {
     pimpl_->panel.MoveTo(rc);
+  } else {
+    // 面板窗口还没建好（或已销毁）时位置会被静默丢掉：B4 去重后这次上报不会
+    // 再来第二次，所以这种丢弃必须在日志里可见。
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[ui] ip-drop rc=%ld,%ld,%ld,%ld pimpl=%d win=%d", rc.left,
+                 rc.top, rc.right, rc.bottom, pimpl_ ? 1 : 0,
+                 (pimpl_ && pimpl_->panel.IsWindow()) ? 1 : 0);
   }
 }
 

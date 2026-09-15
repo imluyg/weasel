@@ -2,6 +2,7 @@
 #include "WeaselIPC.h"
 #include "WeaselTSF.h"
 #include <KeyEvent.h>
+#include <WeaselPerfLog.h>
 #include "CandidateList.h"
 
 static weasel::KeyEvent prevKeyEvent;
@@ -66,6 +67,11 @@ STDMETHODIMP WeaselTSF::OnSetFocus(BOOL fForeground) {
   // 焦点切换后服务端是新的会话，位置不能沿用旧值比较（两个应用光标坐标
   // 恰好相同时会漏发），让下一次上报必发。
   _lastInputPosValid = FALSE;
+  {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[tsf] focus fg=%d -> cache invalidated", fForeground ? 1 : 0);
+  }
   if (fForeground)
     m_client.FocusIn();
   else {
