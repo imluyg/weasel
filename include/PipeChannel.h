@@ -189,9 +189,16 @@ class PipeChannel : public PipeChannelBase {
     // 唯一安全的有界等待是 PeekNamedPipe 轮询。
     constexpr DWORD kResRecvTimeoutMs = 2000;
     constexpr DWORD kPeekIntervalMs = 10;
+    // 先在极短窗口内自旋，再退回 Sleep：服务端通常几十微秒到几毫秒就回包，而
+    // ::Sleep(10) 会被系统计时器粒度（默认 15.6ms）向上取整成一整个 tick —— 实测
+    // 每次回包平添 15.9ms（p95），每键 4 次 IPC 就是约 60ms/键。自旋窗口只有
+    // 3ms 且用 SwitchToThread 让出时间片，长时间等待仍走 Sleep，不烧 CPU，
+    // 2s 上限不变。
+    constexpr ULONGLONG kSpinWindowMs = 3;
     // 用真实时钟做截止时间，而不是「循环次数 × 10ms」：::Sleep(10) 会被系统
     // 计时器粒度（默认 15.6ms）向上取整，按次数计时的实际上限会漂到约 3.2s。
     const ULONGLONG deadline = ::GetTickCount64() + kResRecvTimeoutMs;
+    const ULONGLONG spin_until = ::GetTickCount64() + kSpinWindowMs;
     for (;;) {
       DWORD avail = 0;
       if (!::PeekNamedPipe(*phandle, NULL, 0, NULL, &avail, NULL)) {
@@ -210,7 +217,10 @@ class PipeChannel : public PipeChannelBase {
         _FinalizePipe(*phandle);
         throw (DWORD)ERROR_TIMEOUT;
       }
-      ::Sleep(kPeekIntervalMs);
+      if (::GetTickCount64() < spin_until)
+        ::SwitchToThread();  // 快路径：不让计时器粒度决定回包延迟
+      else
+        ::Sleep(kPeekIntervalMs);  // 慢路径：长时间无回包时低 CPU 等待
     }
   }
 
