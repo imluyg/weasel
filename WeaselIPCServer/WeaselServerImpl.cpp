@@ -291,14 +291,18 @@ DWORD ServerImpl::OnUpdateInputPosition(WEASEL_IPC_COMMAND uMsg,
 
   {
     using PPTLPFPMDPI = BOOL(WINAPI*)(HWND, LPPOINT);
-    PPTLPFPMDPI PhysicalToLogicalPointForPerMonitorDPI =
+    // 函数指针只查一次：GetProcAddress 每次输入都做是纯粹的浪费；
+    // 函数不存在时必须跳过，不能调用空指针。
+    static PPTLPFPMDPI PhysicalToLogicalPointForPerMonitorDPI =
         (PPTLPFPMDPI)::GetProcAddress(m_hUser32Module,
                                       "PhysicalToLogicalPointForPerMonitorDPI");
-    POINT lt = {rc.left, rc.top};
-    POINT rb = {rc.right, rc.bottom};
-    PhysicalToLogicalPointForPerMonitorDPI(NULL, &lt);
-    PhysicalToLogicalPointForPerMonitorDPI(NULL, &rb);
-    rc = {lt.x, lt.y, rb.x, rb.y};
+    if (PhysicalToLogicalPointForPerMonitorDPI) {
+      POINT lt = {rc.left, rc.top};
+      POINT rb = {rc.right, rc.bottom};
+      PhysicalToLogicalPointForPerMonitorDPI(NULL, &lt);
+      PhysicalToLogicalPointForPerMonitorDPI(NULL, &rb);
+      rc = {lt.x, lt.y, rb.x, rb.y};
+    }
   }
 
   m_pRequestHandler->UpdateInputPosition(rc, lParam);
