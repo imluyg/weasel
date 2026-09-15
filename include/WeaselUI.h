@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <WeaselIPCData.h>
 #include <vector>
@@ -156,6 +156,9 @@ class DirectWriteResources {
   ComPtr<IDWriteTextFormat1> pCommentTextFormat;
   ComPtr<IDWriteTextLayout2> pTextLayout;
   ComPtr<ID2D1SolidColorBrush> pBrush;
+  // 是否强制使用 D2D1_RENDER_TARGET_TYPE_SOFTWARE。默认 false = 原行为（DEFAULT）；
+  // 仅由环境变量 WEASEL_D2D_SOFTWARE=1 打开，用于真机 A/B 排查。
+  bool use_software_rt_ = false;
 
  private:
   UIStyle& _style;

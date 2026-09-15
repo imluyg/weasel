@@ -37,7 +37,8 @@ DirectWriteResources::DirectWriteResources(weasel::UIStyle& style,
       pPreeditTextFormat(NULL),
       pTextFormat(NULL),
       pLabelTextFormat(NULL),
-      pCommentTextFormat(NULL) {
+      pCommentTextFormat(NULL),
+      use_software_rt_(false) {
   D2D1_TEXT_ANTIALIAS_MODE mode =
       _style.antialias_mode <= 3
           ? (D2D1_TEXT_ANTIALIAS_MODE)(_style.antialias_mode)
@@ -52,8 +53,25 @@ DirectWriteResources::DirectWriteResources(weasel::UIStyle& style,
   /* ID2D1HwndRenderTarget */
   const D2D1_PIXEL_FORMAT format = D2D1::PixelFormat(
       DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
+  // 渲染目标类型的开关。默认**保持原行为**（DEFAULT），只提供显式开关做真机 A/B：
+  //   WEASEL_D2D_SOFTWARE=1 → 强制 SOFTWARE；=0 → 强制 DEFAULT
+  // 微基准显示 SOFTWARE 每帧省 0.30~0.39ms（固定段 0.351→0.025ms），且像素比对
+  // 证明 antialias_mode=default(0)/grayscale(2) 下与 DEFAULT 逐字节相同。但它仍是
+  // 渲染路径的全局改变，证据只来自本机合成基准，故不自动启用——先在真机上用
+  // .workbuddy\perf\collect_paint.ps1 做 A/B，确认收益后再考虑改默认值。
+  {
+    char buf[8] = {0};
+    const DWORD n =
+        ::GetEnvironmentVariableA("WEASEL_D2D_SOFTWARE", buf, sizeof(buf));
+    if (n > 0 && n < sizeof(buf))
+      use_software_rt_ = (buf[0] == '1');
+    // 未设置：保持 DEFAULT（use_software_rt_ 初值为 false）
+  }
+  const D2D1_RENDER_TARGET_TYPE rt_type =
+      use_software_rt_ ? D2D1_RENDER_TARGET_TYPE_SOFTWARE
+                       : D2D1_RENDER_TARGET_TYPE_DEFAULT;
   const D2D1_RENDER_TARGET_PROPERTIES properties =
-      D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT, format);
+      D2D1::RenderTargetProperties(rt_type, format);
   HR(pD2d1Factory->CreateDCRenderTarget(&properties, &pRenderTarget));
   pRenderTarget->SetTextAntialiasMode(mode);
   pRenderTarget->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
