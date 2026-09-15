@@ -638,6 +638,8 @@ bool WeaselPanel::_DrawPreedit(const Text& text,
                                CDCHandle dc,
                                const CRect& rc) {
   bool drawn = false;
+  if (!pDWR)
+    return false;
   std::wstring const& t = text.str;
   IDWriteTextFormat1* txtFormat = pDWR->pPreeditTextFormat.Get();
 
@@ -794,10 +796,17 @@ bool WeaselPanel::_DrawCandidates(CDCHandle& dc, bool back) {
   const std::vector<Text>& comments(m_ctx.cinfo.comments);
   const std::vector<Text>& labels(m_ctx.cinfo.labels);
   // prevent all text format nullptr
+  if (!pDWR) {          // 上次 _InitFontRes 创建失败（抛异常）时 pDWR 为空
+    _InitFontRes(true);
+    if (!pDWR)          // 仍失败：本帧放弃绘制，绝不空指针解引用
+      return false;
+  }
   if (pDWR->pTextFormat.Get() == nullptr &&
       pDWR->pLabelTextFormat.Get() == nullptr &&
       pDWR->pCommentTextFormat.Get() == nullptr) {
     _InitFontRes(true);
+    if (!pDWR)
+      return false;
   }
   ComPtr<IDWriteTextFormat1> txtFormat = pDWR->pTextFormat;
   ComPtr<IDWriteTextFormat1> labeltxtFormat = pDWR->pLabelTextFormat;
