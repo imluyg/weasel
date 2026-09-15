@@ -66,17 +66,19 @@ STDMETHODIMP WeaselTSF::OnSetFocus(BOOL fForeground) {
   // 焦点切换后服务端是新的会话，位置不能沿用旧值比较（两个应用光标坐标
   // 恰好相同时会漏发），让下一次上报必发。
   _lastInputPosValid = FALSE;
-  {
-    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
-    if (log.enabled())
-      log.Writef("[tsf] focus fg=%d -> cache invalidated", fForeground ? 1 : 0);
-  }
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  const bool logging = log.enabled();
+  const ULONGLONG t0 = logging ? weasel::perf::PosLog::Now() : 0;
   if (fForeground)
     m_client.FocusIn();
   else {
     m_client.FocusOut();
     _AbortComposition();
   }
+  if (logging)
+    log.Writef("[tsf] focus fg=%d -> cache invalidated us=%.2f",
+               fForeground ? 1 : 0,
+               weasel::perf::PerfLog::Ms(t0, weasel::perf::PosLog::Now()));
 
   return S_OK;
 }

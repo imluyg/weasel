@@ -1,6 +1,7 @@
-﻿#include "stdafx.h"
+#include "stdafx.h"
 
 #include <WeaselIPCData.h>
+#include <WeaselPerfLog.h>
 #include <thread>
 #include <shellapi.h>
 #include <tlhelp32.h>
@@ -177,13 +178,22 @@ STDMETHODIMP WeaselTSF::OnSetThreadFocus() {
   RegGetStringValue(HKEY_CURRENT_USER, L"Software\\Rime\\weasel",
                     L"ToggleImeOnOpenClose", _ToggleImeOnOpenClose);
   _isToOpenClose = (_ToggleImeOnOpenClose == L"yes");
-  if (m_client.Echo()) {
-    m_client.ProcessKeyEvent(0);
-    weasel::ResponseParser parser(NULL, NULL, &_status, NULL, &_cand->style());
-    bool ok = m_client.GetResponseData(std::ref(parser));
-    if (ok)
-      _UpdateLanguageBar(_status);
-  }
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  const bool logging = log.enabled();
+  const ULONGLONG t0 = logging ? weasel::perf::PosLog::Now() : 0;
+  // 这里原本先 m_client.Echo() 探活再发空按键：Echo 是白扔的一整趟往返。
+  // ProcessKeyEvent/_SendMessage 内部按 _Active() 短路、并自己吞掉管道异常
+  // （WeaselClientImpl.cpp:193-202），服务端不在时既不阻塞也不会抛；而
+  // GetResponseData 读的是"接收缓冲里最近一次回包"，服务端不在时解析到的就是
+  // 同一份数据（_status 本来就是从它来的），所以去掉 Echo 不会引入状态错乱。
+  m_client.ProcessKeyEvent(0);
+  weasel::ResponseParser parser(NULL, NULL, &_status, NULL, &_cand->style());
+  bool ok = m_client.GetResponseData(std::ref(parser));
+  if (logging)
+    log.Writef("[tsf] threadfocus ok=%d us=%.2f", ok ? 1 : 0,
+               weasel::perf::PerfLog::Ms(t0, weasel::perf::PosLog::Now()));
+  if (ok)
+    _UpdateLanguageBar(_status);
   return S_OK;
 }
 STDMETHODIMP WeaselTSF::OnKillThreadFocus() {

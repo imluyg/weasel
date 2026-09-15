@@ -411,6 +411,11 @@ DWORD ServerImpl::OnChangePage(WEASEL_IPC_COMMAND uMsg,
 template <typename _Resp>
 void ServerImpl::HandlePipeMessage(PipeMessage pipe_msg, _Resp resp) {
   DWORD result = 0;
+  // D1：焦点切换路径上的每一次往返都在这里量一遍。按命令分别统计才好判断
+  // "OnSetThreadFocus 那个空按键"值不值得改（它会走一遍完整的按键处理）。
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  const bool logging = log.enabled();
+  const ULONGLONG t0 = logging ? weasel::perf::PosLog::Now() : 0;
   try {
     MAP_PIPE_MSG_HANDLE(pipe_msg.Msg, pipe_msg.wParam, pipe_msg.lParam)
     PIPE_MSG_HANDLE(WEASEL_IPC_ECHO, OnEcho)
@@ -439,6 +444,18 @@ void ServerImpl::HandlePipeMessage(PipeMessage pipe_msg, _Resp resp) {
     // 在回包之后再丢弃：客户端在 _ReceiveResponse 上等这次发送，异常跳过
     // resp() 会让客户端收不到任何字节而永久阻塞（见任务 A1）。
     result = 0;
+  }
+  if (logging) {
+    const double ms = weasel::perf::PerfLog::Ms(t0, weasel::perf::PosLog::Now());
+    const bool is_key = (pipe_msg.Msg == WEASEL_IPC_PROCESS_KEY_EVENT);
+    // 按键与 FOCUS_IN 每次都记（要对比"空按键"和普通按键）；其它命令只记慢的。
+    if (is_key) {
+      weasel::KeyEvent ke(pipe_msg.wParam);
+      log.Writef("[ipc] key=%u mask=0x%x ms=%.2f", (unsigned)ke.keycode,
+                 (unsigned)ke.mask, ms);
+    } else if (pipe_msg.Msg == WEASEL_IPC_FOCUS_IN || ms >= 1.0) {
+      log.Writef("[ipc] cmd=0x%x ms=%.2f", (unsigned)pipe_msg.Msg, ms);
+    }
   }
   resp(result);
 }
