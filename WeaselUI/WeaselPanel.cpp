@@ -121,10 +121,16 @@ void WeaselPanel::_ResizeWindow() {
 //   ① 字号若是上一帧缩过的，内容变窄了就恢复配置字号；
 //   ② 截断候选**显示**文本（`style.candidate_abbreviate_length` 同一套语义：
 //      只影响面板显示与 ITfCandidateListUIElement::GetString，上屏内容由服务端
-//      commit 决定，不受影响），保留至少 6 字 + "..."；
+//      commit 决定，不受影响），截断后总长下限 6 个字符（含结尾的 "..."）；
 //   ③ 候选已经到截断下限还超预算，才缩字号（下限 85%）。
 // 同帧内只朝一个方向走（缩小），绝不放大 → 不会出现"窗口 1805 而字模 1934"
 // 那种尺寸/字模不一致（那会把最右边的候选裁掉）。
+//
+// 每一轮的截断都从 `m_fitOrigCandies`（本帧的截断前快照）重新算，并且保证
+// "本轮 limit 严格小于上一轮"：早期实现在上一轮结果上再截、且拿 limit 去估一个
+// 实际长度为 limit+2 的串，二者合起来让宽度停在一个高于预算的不动点上，4 次迭代
+// 全烧在那里，缩字号永远轮不到（真机 pos.log.3248 第 275 帧：cx 连三轮 1425、
+// trim 恒为 12，最终 6/6 帧超预算）。
 // 返回 true = 已改动，调用方需要重新 DoLayout。
 bool WeaselPanel::_FitToWorkAreaWidth() {
   if (!pDWR || !m_layout || m_ctx.empty())
@@ -162,39 +168,59 @@ bool WeaselPanel::_FitToWorkAreaWidth() {
   if (cx <= budget)
     return false;  // 收敛
 
-  // ② 截断候选显示文本
-  size_t maxLen = 0;
-  for (const auto& c : m_ctx.cinfo.candies)
-    if (c.str.size() > maxLen)
-      maxLen = c.str.size();
-  const int kMinChars = 6;
-  if (maxLen > (size_t)kMinChars) {
-    // 用"上一点"做两点线性内插（宽度 ≈ 固定开销 + k×字数），通常一两轮就到位；
-    // 没有上一点时退化成按比例估。
-    int limit;
-    if (m_fitTryLimit > 0 && m_fitTryCx > cx && m_fitTryLimit > (int)maxLen) {
-      const double slope = (double)(m_fitTryCx - cx) /
-                           (double)(m_fitTryLimit - (int)maxLen);
-      const double fixed = cx - slope * (int)maxLen;
-      limit = slope > 0.0 ? (int)((budget - fixed) / slope) : (int)maxLen;
-    } else {
-      limit = (int)((long long)maxLen * budget / cx);
+  // 本帧第一次进来时快照"截断前"的候选文本；之后每轮都从这份快照重新截断，
+  // 保证估算建立在原始长度上（见头文件里 m_fitOrigCandies 的注释）。
+  if (!m_fitOrigValid) {
+    m_fitOrigCandies.clear();
+    m_fitOrigCandies.reserve(m_ctx.cinfo.candies.size());
+    m_fitOrigMaxLen = 0;
+    for (const auto& c : m_ctx.cinfo.candies) {
+      m_fitOrigCandies.push_back(c.str);
+      if (c.str.size() > m_fitOrigMaxLen)
+        m_fitOrigMaxLen = c.str.size();
     }
+    m_fitCxFull = cx;
+    m_fitOrigValid = true;
+  }
+
+  // ② 截断候选显示文本（下限 kMinChars，含结尾的 "..."）
+  //    no_progress：本轮行宽没比上一轮小 ⇒ 截断已经榨不出宽度了，别再试，直接
+  //    落到 ③ 缩字号（否则长候选会把迭代次数一路烧到上限）。
+  const bool no_progress = (m_fitLastCx > 0 && cx >= m_fitLastCx);
+  m_fitLastCx = cx;
+  const int kMinChars = 6;
+  if (m_fitOrigMaxLen > (size_t)kMinChars && !no_progress) {
+    // 宽度 ≈ fixed + slope × 字数：两个点分别是
+    //   (原始字数, m_fitCxFull)            未截断时量到的行宽
+    //   (上次截到的字数, cx)               当前这次 DoLayout 量到的行宽
+    int limit = 0;
+    if (m_fitTryLimit > 0 && (int)m_fitOrigMaxLen > m_fitTryLimit &&
+        m_fitCxFull > cx) {
+      const double l1 = (double)m_fitOrigMaxLen;
+      const double l2 = (double)m_fitTryLimit;
+      const double slope = (double)(m_fitCxFull - cx) / (l1 - l2);
+      if (slope > 0.0) {
+        const double fixed = (double)m_fitCxFull - slope * l1;
+        limit = (int)(((double)budget - fixed) / slope);
+      }
+    }
+    if (limit <= 0)  // 只有单点信息时退化成按比例估
+      limit = (int)((long long)m_fitOrigMaxLen * budget / cx);
+    // 必须严格短于上一轮，否则循环不收敛 —— 旧实现卡住的直接原因。
+    if (m_fitTryLimit > 0 && limit >= m_fitTryLimit)
+      limit = m_fitTryLimit - 1;
     if (limit < kMinChars)
       limit = kMinChars;
-    if (limit < (int)maxLen) {
+    if (limit < (int)m_fitOrigMaxLen && limit != m_fitTryLimit &&
+        _ApplyFitTrim((size_t)limit)) {
       m_fitTryLimit = limit;
-      m_fitTryCx = cx;
-      for (auto& c : m_ctx.cinfo.candies) {
-        if (c.str.size() > (size_t)limit)
-          c.str = c.str.substr(0, limit - 1) + L"...";
-      }
       _FitLog(cx, budget, limit, 100);
       return true;
     }
+    // 走到这里说明：已经截到下限、或截断不再改变宽度 ⇒ 落到 ③ 缩字号
   }
 
-  // ③ 候选已经很短还是超预算：缩字号（下限 85%，不再往下缩）
+  // ③ 候选已经很短（或已到截断下限）还是超预算：缩字号（下限 85%，不再往下缩）
   const int kMinPercent = 85;
   int next = (int)((long long)100 * budget / cx);
   if (next < kMinPercent)
@@ -206,6 +232,32 @@ bool WeaselPanel::_FitToWorkAreaWidth() {
     return true;
   }
   return false;
+}
+
+// 把候选的**显示**文本截到 limit 个字符（含结尾的 "..."）。只影响面板显示与
+// ITfCandidateListUIElement::GetString；上屏内容由服务端 commit 决定，不受影响。
+// 与旧实现的两点区别：
+//   1. 每轮都从"截断前"的快照重新截，而不是在上一轮结果上再截；
+//   2. 结果总长度正好是 limit —— 旧写法 substr(0, limit-1)+L"..." 得到的是
+//      limit+2，却拿 limit 去估宽度，模型自相矛盾（正是不动点的来源）。
+bool WeaselPanel::_ApplyFitTrim(size_t limit) {
+  if (!m_fitOrigValid)
+    return false;
+  const size_t n = min(m_fitOrigCandies.size(), m_ctx.cinfo.candies.size());
+  bool changed = false;
+  for (size_t i = 0; i < n; i++) {
+    const std::wstring& orig = m_fitOrigCandies[i];
+    std::wstring s = orig;
+    if (orig.size() > limit) {
+      const size_t keep = (limit > 3) ? (limit - 3) : 1;
+      s = orig.substr(0, keep) + L"...";
+    }
+    if (m_ctx.cinfo.candies[i].str != s) {
+      m_ctx.cinfo.candies[i].str = s;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 bool WeaselPanel::_ApplyFitFontPercent(int percent) {
@@ -325,8 +377,12 @@ void WeaselPanel::Refresh() {
       // （横向布局 + 万象长句候选）见过 1934/1991px 的窗口 vs 1928px 屏宽：窗口
       // 随后被 _RepositionWindow 的贴边夹取推到光标左边近千像素，盖住整行文字。
       m_fitTryLimit = -1;
-      m_fitTryCx = 0;
-      for (int guard = 0; guard < 4; guard++) {
+      m_fitOrigValid = false;  // 每帧重新快照"截断前"的候选文本
+      m_fitLastCx = 0;         // 每帧重新判"有没有进展"
+      // 上界放宽到 8：截断到下限本身可能要几轮，缩字号还排在截断之后才轮到。
+      // 收敛靠 _FitToWorkAreaWidth 内部"每轮严格更短 + 到下限转缩字号"保证，
+      // 不靠这个计数（旧实现的 4 次上界正是被不动点白烧掉的）。
+      for (int guard = 0; guard < 8; guard++) {
         m_layout->DoLayout(dc, pDWR);
         if (!_FitToWorkAreaWidth())
           break;

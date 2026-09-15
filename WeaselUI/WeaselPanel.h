@@ -1,4 +1,7 @@
 #pragma once
+#include <string>
+#include <vector>
+
 #include <WeaselIPCData.h>
 #include <WeaselUI.h>
 #include "StandardLayout.h"
@@ -90,6 +93,8 @@ class WeaselPanel
   // （true = 已改动，需要重新 DoLayout）
   bool _FitToWorkAreaWidth();
   bool _ApplyFitFontPercent(int percent);
+  // 按预算把候选的**显示**文本截到 limit 个字符（含结尾的 "..."）
+  bool _ApplyFitTrim(size_t limit);
   void _FitLog(int cx, int budget, int trimChars, int percent);
   // 只有画出来有意义时才重绘（隐藏的服务端面板跳过）
   void _RedrawIfUseful();
@@ -150,9 +155,20 @@ class WeaselPanel
   bool m_sticky;
   // 当前生效的字号百分比（100 = 皮肤里配的字号）；_InitFontRes 重建资源时复位
   int m_fitFontPercent = 100;
-  // 本帧内"两点线性内插"用的试探点（截断字数 → 当时量到的宽度）
+  // 本帧 fit 用的**截断前**候选显示文本（快照）。每轮都从这份快照重新截断：
+  // 旧实现直接在上一轮截断过的串上再截，而 substr(0, limit-1)+L"..." 得到的长度是
+  // limit+2，于是"按比例算出的下一轮 limit"正好等于上一轮的值 —— 宽度卡在一个高于
+  // 预算的不动点上，4 次迭代全烧在那里，永远走不到第 ③ 步缩字号。
+  // 真机 pos.log.3248：#275 帧 cx 连续三轮都是 1425 而 trim 一直是 12。
+  std::vector<std::wstring> m_fitOrigCandies;
+  size_t m_fitOrigMaxLen = 0;  // 快照里的最大字符数
+  int m_fitCxFull = 0;         // 未截断时的行宽（两点内插的第一个点）
+  bool m_fitOrigValid = false;
+  // 上一轮 fit 结束时量到的行宽：本轮的 cx 没有变小就说明截断已经帮不上忙，
+  // 直接转去缩字号，不必把迭代次数烧光
+  int m_fitLastCx = 0;
+  // 本帧内"两点线性内插"用的试探点：上次截到的字数 → 当前量到的宽度就是那个点的宽度
   int m_fitTryLimit = -1;
-  int m_fitTryCx = 0;
   // for multi font_face & font_point
   PDWR pDWR;
   std::function<void(size_t* const, size_t* const, bool* const, bool* const)>&
