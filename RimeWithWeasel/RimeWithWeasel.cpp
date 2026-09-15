@@ -671,24 +671,33 @@ void RimeWithWeaselHandler::_LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
 }
 
 bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
-  std::lock_guard<std::mutex> lock(m_notifier_mutex);
-  if (m_message_type.empty() || m_message_value.empty())
-    return m_ui->IsCountingDown();
+  std::string message_type, message_value, message_label, option_name;
+  {
+    std::lock_guard<std::mutex> lock(m_notifier_mutex);
+    if (m_message_type.empty() || m_message_value.empty())
+      return m_ui->IsCountingDown();
+    message_type = m_message_type;
+    message_value = m_message_value;
+    message_label = m_message_label;
+    option_name = m_option_name;
+  }
+  // 以下不再持锁：OnNotify 由部署/维护线程调用并在锁内做 get_state_label，
+  // 按键路径不应在锁内做字符串构造与配置查找。
   // show as auxiliary string
   std::wstring& tips(ctx.aux.str);
   bool show_icon = false;
-  if (m_message_type == "deploy") {
-    if (m_message_value == "start")
+  if (message_type == "deploy") {
+    if (message_value == "start")
       if (GetThreadUILanguage() == MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US))
         tips = L"Deploying RIME";
       else
         tips = L"正在部署 RIME";
-    else if (m_message_value == "success")
+    else if (message_value == "success")
       if (GetThreadUILanguage() == MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US))
         tips = L"Deployed";
       else
         tips = L"部署完成";
-    else if (m_message_value == "failure") {
+    else if (message_value == "failure") {
       if (GetThreadUILanguage() ==
           MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL))
         tips = L"有錯誤，請查看日誌 %TEMP%\\rime.weasel\\rime.weasel.*.INFO";
@@ -700,28 +709,28 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
             L"There is an error, please check the logs "
             L"%TEMP%\\rime.weasel\\rime.weasel.*.INFO";
     }
-  } else if (m_message_type == "schema") {
+  } else if (message_type == "schema") {
     tips = /*L"【" + */ status.schema_name /* + L"】"*/;
-  } else if (m_message_type == "option") {
+  } else if (message_type == "option") {
     status.type = SCHEMA;
-    if (m_message_value == "!ascii_mode") {
+    if (message_value == "!ascii_mode") {
       show_icon = true;
-    } else if (m_message_value == "ascii_mode") {
+    } else if (message_value == "ascii_mode") {
       show_icon = true;
     } else
-      tips = u8tow(m_message_label);
+      tips = u8tow(message_label);
 
-    if (m_message_value == "full_shape" || m_message_value == "!full_shape")
+    if (message_value == "full_shape" || message_value == "!full_shape")
       status.type = FULL_SHAPE;
   }
   auto counter = m_ui->IsCountingDown();
   if (!show_icon && counter)
     return counter;
-  auto foption = m_show_notifications.find(m_option_name);
+  auto foption = m_show_notifications.find(option_name);
   auto falways = m_show_notifications.find("always");
   if ((!add_session && (foption != m_show_notifications.end() ||
                         falways != m_show_notifications.end())) ||
-      m_message_type == "deploy") {
+      message_type == "deploy") {
     m_ui->Update(ctx, status);
     if (m_show_notifications_time)
       m_ui->ShowWithTimeout(m_show_notifications_time);
