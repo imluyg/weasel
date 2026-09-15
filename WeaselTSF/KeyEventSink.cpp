@@ -5,9 +5,8 @@
 #include <WeaselPerfLog.h>
 #include "CandidateList.h"
 
-static weasel::KeyEvent prevKeyEvent;
-static BOOL prevfEaten = FALSE;
-static int keyCountToSimulate = 0;
+// Caps Lock 双击模拟的状态改为 WeaselTSF 的成员（_prevKeyEvent / _prevKeyEaten /
+// _keyCountToSimulate）：文件级 static 会被同进程内的多个 TSF 实例共用。
 
 void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
   // when _IsKeyboardDisabled don't eat the key,
@@ -35,15 +34,15 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
       else if (ke.keycode == ibus::Down)
         ke.keycode = ibus::Up;
     }
-    if (!keyCountToSimulate)
+    if (!_keyCountToSimulate)
       *pfEaten = (BOOL)m_client.ProcessKeyEvent(ke);
 
     if (ke.keycode == ibus::Caps_Lock) {
-      if (prevKeyEvent.keycode == ibus::Caps_Lock && prevfEaten == TRUE &&
-          (ke.mask & ibus::RELEASE_MASK) && (!keyCountToSimulate)) {
+      if (_prevKeyEvent.keycode == ibus::Caps_Lock && _prevKeyEaten == TRUE &&
+          (ke.mask & ibus::RELEASE_MASK) && (!_keyCountToSimulate)) {
         if ((GetKeyState(VK_CAPITAL) & 0x01)) {
           if (_committed || (!*pfEaten && _status.composing)) {
-            keyCountToSimulate = 2;
+            _keyCountToSimulate = 2;
             INPUT inputs[2];
             inputs[0].type = INPUT_KEYBOARD;
             inputs[0].ki = {VK_CAPITAL, 0, 0, 0, 0};
@@ -54,12 +53,12 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
         }
         *pfEaten = TRUE;
       }
-      if (keyCountToSimulate)
-        keyCountToSimulate--;
+      if (_keyCountToSimulate)
+        _keyCountToSimulate--;
     }
 
-    prevfEaten = *pfEaten;
-    prevKeyEvent = ke;
+    _prevKeyEaten = *pfEaten;
+    _prevKeyEvent = ke;
   }
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Globals.h"
+#include <KeyEvent.h>
 #include <WeaselIPC.h>
 #include <WeaselIPCData.h>
 #include <thread>
@@ -227,6 +228,12 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   /* 上一次上报给服务端的输入位置，用于跳过重复 IPC */
   RECT _lastInputPos = {0, 0, 0, 0};
   BOOL _lastInputPosValid = FALSE;
+  /* Caps Lock 双击模拟的状态。原本是 KeyEventSink.cpp 的文件级 static：同一个
+   * 进程里多个 TSF 实例会共用同一份状态，互相串味（一个文档里敲的大写锁定可能
+   * 影响另一个文档）。改成每实例成员。 */
+  weasel::KeyEvent _prevKeyEvent;
+  BOOL _prevKeyEaten = FALSE;
+  int _keyCountToSimulate = 0;
 
   /* Weasel Related */
   weasel::Client m_client;

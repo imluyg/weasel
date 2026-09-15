@@ -58,10 +58,11 @@ STDMETHODIMP_(ULONG) CCandidateList::Release(void) {
 }
 
 STDMETHODIMP CCandidateList::GetDescription(BSTR* pbstr) {
-  static auto str = SysAllocString(L"Candidate List");
-  if (pbstr) {
-    *pbstr = str;
-  }
+  // 按 TSF 约定，调用方拿到 BSTR 后会用 SysFreeString 释放它。原实现返回一个
+  // static 的 SysAllocString 结果：宿主释放掉的是我们唯一的分配，之后我们手上
+  // 那个指针就是野指针，任何再次释放/读取都是重复释放或 UAF。每次调用新分配。
+  if (pbstr)
+    *pbstr = SysAllocString(L"Candidate List");
   return S_OK;
 }
 

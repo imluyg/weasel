@@ -24,7 +24,11 @@ typedef enum { COLOR_ABGR = 0, COLOR_ARGB, COLOR_RGBA } ColorFormat;
 using namespace weasel;
 
 static RimeApi* rime_api;
-WeaselSessionId _GenerateNewWeaselSessionId(SessionStatusMap sm, DWORD pid) {
+// 只需要 map 的最大 key，按值传参会把整个 SessionStatusMap（每个 SessionStatus
+// 里还带 UIStyle 与 RimeStatus）深拷贝一遍 —— 会话一多就是每次新建会话一次
+// 全量拷贝。改成 const& 后语义完全不变。
+WeaselSessionId _GenerateNewWeaselSessionId(const SessionStatusMap& sm,
+                                            DWORD pid) {
   if (sm.empty())
     return (WeaselSessionId)(pid + 1);
   return (WeaselSessionId)(sm.rbegin()->first + 1);
