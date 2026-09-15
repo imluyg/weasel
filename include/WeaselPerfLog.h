@@ -133,6 +133,10 @@ class PerfLog : public EnvLog {
 //         "Destroy 销毁窗口但标志不复位"的隐患真的被触发了。
 //   [sess] add / remove / client-gone  服务端会话表（total= 当前会话数）。
 //         "client-gone" 是管道断开时的回收：如果 total 只涨不落，就是泄漏。
+//   [sess] miss where=to_session_id|get_session_status ipc=N total=T
+//         有客户端拿一个服务端不认识的 ipc_id 来查会话（例如服务端重启后、
+//         或会话被回收后客户端还拿着旧 id）。这条以前是静默的 operator[]，
+//         会往会话表里插幽灵条目；现在只记录，不再插入。
 class PosLog : public EnvLog {
  public:
   static PosLog& Instance() {

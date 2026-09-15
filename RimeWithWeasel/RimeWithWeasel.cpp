@@ -68,6 +68,26 @@ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
   m_app_options.clear();
 }
 
+// 未注册 ipc_id 的查询（to_session_id / get_session_status）。以前这两处用
+// map::operator[]，会静默往会话表里插一份默认 SessionStatus —— 真机上就是
+// "[sess] total 只涨不落"的那条泄漏。现在既不插入也不静默：命中时写一条
+// [sess] miss（上限 kMaxUnknownSessionLogs 行，避免按键路径刷爆日志）。
+void RimeWithWeaselHandler::_LogUnknownSession(const char* where,
+                                               WeaselSessionId ipc_id) {
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  if (!log.enabled())
+    return;
+  if (m_unknown_session_logs < kMaxUnknownSessionLogs) {
+    m_unknown_session_logs++;
+    log.Writef("[sess] miss where=%s ipc=%u total=%u", where, (unsigned)ipc_id,
+               (unsigned)m_session_status_map.size());
+  } else if (m_unknown_session_logs == kMaxUnknownSessionLogs) {
+    m_unknown_session_logs++;
+    log.Writef("[sess] miss suppressed after %u lines",
+               (unsigned)kMaxUnknownSessionLogs);
+  }
+}
+
 bool add_session = false;
 void _UpdateUIStyle(RimeConfig* config, UI* ui, bool initialize);
 bool _UpdateUIStyleColor(RimeConfig* config,
