@@ -39,9 +39,21 @@ bool PipeChannelBase::_Ensure() {
 }
 
 HANDLE PipeChannelBase::_Connect(const wchar_t* name) {
+  // 管道存在但实例一直被占用时（服务端卡死、占着实例又不新增），这里原本是
+  // 无上限的 while (WaitNamedPipe(name, 500))：调用它的是 TSF 回调线程，
+  // 一旦停住就是这么也回不来的宿主冻结。给等待加一个上限，超时按既有约定
+  // 抛 DWORD —— 上层 _Ensure() 会返回 false，客户端 _SendMessage 捕获后返回 0，
+  // 按键被放行，宿主继续可用。
+  constexpr DWORD kConnectTimeoutMs = 2000;
+  constexpr DWORD kConnectWaitSliceMs = 500;
+  const ULONGLONG deadline = ::GetTickCount64() + kConnectTimeoutMs;
   HANDLE pipe = INVALID_HANDLE_VALUE;
-  while (_Invalid(pipe = _TryConnect()))
-    ::WaitNamedPipe(name, 500);
+  while (_Invalid(pipe = _TryConnect())) {
+    if (::GetTickCount64() >= deadline) {
+      _ThrowCode(ERROR_TIMEOUT);
+    }
+    ::WaitNamedPipe(name, kConnectWaitSliceMs);
+  }
   DWORD mode = PIPE_READMODE_MESSAGE;
   if (!SetNamedPipeHandleState(pipe, &mode, NULL, NULL)) {
     _ThrowLastError;

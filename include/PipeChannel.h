@@ -118,7 +118,14 @@ class PipeChannel : public PipeChannelBase {
   }
 
   _TyRes Transact(Msg& msg) {
-    _Ensure();
+    // 连接不可用时不再往下走：_Send 只会在无效句柄上失败，并可能再触发一次
+    // 连接等待，白白让 TSF 线程多停一个 kConnectTimeoutMs。这里直接按既有约定
+    // 抛 DWORD 放行按键，同时照 _Send 收尾的做法清掉待发 body，避免残留内容
+    // 污染下一次请求。
+    if (!_Ensure()) {
+      ClearBufferStream();
+      throw (DWORD)ERROR_TIMEOUT;
+    }
     HANDLE* phandle = _GetPipeHandle();
     _Send(*phandle, msg);
     return _ReceiveResponse();
@@ -188,15 +195,19 @@ class PipeChannel : public PipeChannelBase {
     for (;;) {
       DWORD avail = 0;
       if (!::PeekNamedPipe(*phandle, NULL, 0, NULL, &avail, NULL)) {
-        _Reconnect();            // 管道已断（服务端退出/连接被关）
-        throw ::GetLastError();  // 走既有 catch(DWORD) 路径
+        const DWORD err = ::GetLastError();  // _FinalizePipe 会覆盖 GetLastError
+        _FinalizePipe(*phandle);  // 管道已断：丢弃本地连接，不在读路径上等待重连
+        throw err;                // 走既有 catch(DWORD) 路径
       }
       if (avail > 0) {
         _Receive(*phandle, &result, sizeof(result));  // 数据已就位，不会阻塞
         return result;
       }
       if (::GetTickCount64() >= deadline) {
-        _Reconnect();       // 超时：丢弃连接，防止残留字节错位
+        // 超时：只丢弃本地连接（防止残留字节错位），**不**就地重连——重连要等
+        // 新连接可用，服务端占着实例又不新增时会长时间阻塞（_Connect 现在有上限，
+        // 但没必要在这里多等一轮）。下一次 Transact 会经 _Ensure() 重新连接。
+        _FinalizePipe(*phandle);
         throw (DWORD)ERROR_TIMEOUT;
       }
       ::Sleep(kPeekIntervalMs);
