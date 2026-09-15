@@ -3,6 +3,7 @@
 #include "Globals.h"
 #include <WeaselIPC.h>
 #include <WeaselIPCData.h>
+#include <thread>
 
 class CCandidateList;
 class CLangBarItemButton;
@@ -230,6 +231,8 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   /* Weasel Related */
   weasel::Client m_client;
   DWORD _activateFlags;
+  /* 拉起服务端的后台线程；析构时必须 join，避免回调到已销毁对象 */
+  std::thread _reconnectThread;
 
   /* IME status */
   weasel::Status _status;

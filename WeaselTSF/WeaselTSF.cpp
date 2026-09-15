@@ -38,6 +38,8 @@ WeaselTSF::WeaselTSF() {
 }
 
 WeaselTSF::~WeaselTSF() {
+  if (_reconnectThread.joinable())
+    _reconnectThread.join();  // 等待重连线程结束，期间成员仍有效
   DllRelease();
 }
 
@@ -261,14 +263,15 @@ bool WeaselTSF::_EnsureServerConnected() {
       if (!m_client.Echo() && GetLastError() != ERROR_ALREADY_EXISTS &&
           !count_server_process()) {
         std::wstring dir = _GetRootDir();
-        std::thread th([dir, this]() {
+        if (_reconnectThread.joinable())
+          _reconnectThread.join();  // 上一次还没结束就先等掉，最多只会有一个
+        _reconnectThread = std::thread([dir, this]() {
           ShellExecuteW(NULL, L"open", (dir + L"\\start_service.bat").c_str(),
                         NULL, dir.c_str(), SW_HIDE);
           // wait 500ms, then reconnect
           std::this_thread::sleep_for(std::chrono::milliseconds(500));
           _Reconnect();
         });
-        th.detach();
       }
       if (hMutex) {
         CloseHandle(hMutex);
