@@ -226,12 +226,14 @@ void CCandidateList::UpdateInputPosition(RECT const& rc) {
 }
 
 void CCandidateList::Destroy() {
+  _pUIElementMgr = nullptr;
   // EndUI();
   Show(FALSE);
   _DisposeUIWindow();
 }
 
 void CCandidateList::DestroyAll() {
+  _pUIElementMgr = nullptr;
   // EndUI();
   Show(FALSE);
   _DisposeUIWindowAll();
@@ -266,19 +268,17 @@ HWND CCandidateList::_GetActiveWnd() {
 }
 
 HRESULT CCandidateList::_UpdateUIElement() {
-  HRESULT hr = S_OK;
-
-  com_ptr<ITfUIElementMgr> pUIElementMgr;
-  com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
-  if (nullptr == pThreadMgr) {
-    return S_OK;
+  if (!_pUIElementMgr) {
+    com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
+    if (nullptr == pThreadMgr) {
+      return S_OK;
+    }
+    if (pThreadMgr->QueryInterface(IID_ITfUIElementMgr,
+                                   (void**)&_pUIElementMgr) != S_OK) {
+      return S_OK;
+    }
   }
-  hr = pThreadMgr->QueryInterface(IID_ITfUIElementMgr, (void**)&pUIElementMgr);
-
-  if (hr == S_OK) {
-    pUIElementMgr->UpdateUIElement(uiid);
-  }
-
+  _pUIElementMgr->UpdateUIElement(uiid);
   return S_OK;
 }
 
@@ -328,6 +328,7 @@ void CCandidateList::EndUI() {
     if (emgr != NULL)
       emgr->EndUIElement(uiid);
   }
+  _pUIElementMgr = nullptr;
   _uiStarted = false;
   _DisposeUIWindow();
 }

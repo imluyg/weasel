@@ -89,4 +89,5 @@ class CCandidateList : public ITfIntegratableCandidateListUIElement,
   weasel::UIStyle _style;
 
   com_ptr<ITfContext> _pContextDocument;
+  com_ptr<ITfUIElementMgr> _pUIElementMgr;  // 缓存，避免每次按键 QueryInterface
 };
