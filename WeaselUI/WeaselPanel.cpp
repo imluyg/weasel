@@ -96,6 +96,7 @@ WeaselPanel::~WeaselPanel() {
   // 必须在 GdiplusShutdown 之前释放 GDI+ 对象（成员 unique_ptr 的析构发生在
   // 析构函数体之后，会把 Bitmap 释放推到 GdiplusShutdown 之后，属未定义行为）
   m_shadowCache.reset();
+  _ReleaseMemDC();
   Gdiplus::GdiplusShutdown(_m_gdiplusToken);
   delete m_layout;
   m_layout = NULL;
@@ -201,6 +202,7 @@ void WeaselPanel::_InitFontRes(bool forced) {
   // resources
   if (forced || (pDWR == NULL) || (m_ostyle != m_style) || (dpiX != dpi)) {
     pDWR.reset();
+    m_memBound = false;  // 新的 render target 需要重新 BindDC（复用 DC 时不会自动重绑）
     try {
       pDWR = std::make_shared<DirectWriteResources>(m_style, dpiX);
       pDWR->pRenderTarget->SetTextAntialiasMode(
@@ -1026,12 +1028,22 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
   // turn off WS_EX_TRANSPARENT, for better resp performance
   ModifyStyleEx(WS_EX_TRANSPARENT, WS_EX_LAYERED);
   GetClientRect(&rcw);
-  // prepare memDC
-  CDCHandle hdc = ::GetDC(m_hWnd);
-  CDCHandle memDC = ::CreateCompatibleDC(hdc);
-  HBITMAP memBitmap = ::CreateCompatibleBitmap(hdc, rcw.Width(), rcw.Height());
-  ::SelectObject(memDC, memBitmap);
-  ReleaseDC(hdc);
+  // prepare memDC: 复用同一块离屏位图（尺寸变化时才重建），并把 BindDC 一起省掉
+  if (m_memDC == NULL || m_memBitmap == NULL || m_memW != rcw.Width() ||
+      m_memH != rcw.Height()) {
+    _ReleaseMemDC();
+    CDCHandle hdc = ::GetDC(m_hWnd);
+    m_memDC = ::CreateCompatibleDC(hdc);
+    m_memBitmap = ::CreateCompatibleBitmap(hdc, rcw.Width(), rcw.Height());
+    m_memOldBitmap = ::SelectObject(m_memDC, m_memBitmap);
+    ReleaseDC(hdc);
+    m_memW = rcw.Width();
+    m_memH = rcw.Height();
+    m_memBound = false;
+  }
+  CDCHandle memDC = m_memDC;
+  // 复用位图时必须先清成透明黑，否则上一帧的内容会与半透明背景叠加
+  ::PatBlt(memDC, 0, 0, rcw.Width(), rcw.Height(), BLACKNESS);
   bool drawn = false;
   if (!hide_candidates) {
     CRect auxrc = m_layout->GetAuxiliaryRect();
@@ -1095,9 +1107,13 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
 
     // begin  texts drawing, if pRenderTarget failed, force to reinit
     // directwrite resources
-    if (FAILED(pDWR->pRenderTarget->BindDC(memDC, &rcw))) {
-      _InitFontRes(true);
-      pDWR->pRenderTarget->BindDC(memDC, &rcw);
+    if (!m_memBound) {
+      // BindDC 只在 DC 新建或 pDWR 重建后做一次（实测每次约 0.70ms）
+      if (FAILED(pDWR->pRenderTarget->BindDC(memDC, &rcw))) {
+        _InitFontRes(true);
+        pDWR->pRenderTarget->BindDC(memDC, &rcw);
+      }
+      m_memBound = true;
     }
     pDWR->pRenderTarget->BeginDraw();
     // draw auxiliary string
@@ -1149,9 +1165,23 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
   }
   _LayerUpdate(rcw, memDC);
 
-  // clean objs
-  ::DeleteDC(memDC);
-  ::DeleteObject(memBitmap);
+  // 离屏 DC/位图是复用成员，不再在这里销毁（见 _ReleaseMemDC）
+}
+
+void WeaselPanel::_ReleaseMemDC() {
+  if (m_memDC != NULL) {
+    if (m_memOldBitmap != NULL)
+      ::SelectObject(m_memDC, m_memOldBitmap);
+    ::DeleteDC(m_memDC);
+    m_memDC = NULL;
+  }
+  if (m_memBitmap != NULL) {
+    ::DeleteObject(m_memBitmap);
+    m_memBitmap = NULL;
+  }
+  m_memOldBitmap = NULL;
+  m_memW = m_memH = 0;
+  m_memBound = false;
 }
 
 // 由于某些软件并不依赖 WM_PAINT 消息来重绘，在消息循环中直接忽略掉了 WM_PAINT
@@ -1193,6 +1223,7 @@ LRESULT WeaselPanel::OnDestroy(UINT uMsg,
   m_hoverIndex = -1;
   m_lastMousePos = {-1, -1};
   m_sticky = false;
+  _ReleaseMemDC();  // 窗口销毁后复用位图不再可用
   delete m_layout;
   m_layout = NULL;
   return 0;

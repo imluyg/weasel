@@ -158,4 +158,13 @@ class WeaselPanel
   int m_shadowCacheOffX = 0;
   int m_shadowCacheOffY = 0;
   COLORREF m_shadowCacheColor = 0x00000000;
+  // 复用的离屏 DC/位图。原来每帧都 CreateCompatibleBitmap + BindDC，实测这两项
+  // 合计约 0.95ms/帧（BindDC 占约 0.70ms），而窗口尺寸在按键过程中基本不变。
+  HDC m_memDC = NULL;
+  HBITMAP m_memBitmap = NULL;
+  HGDIOBJ m_memOldBitmap = NULL;
+  int m_memW = 0;
+  int m_memH = 0;
+  bool m_memBound = false;  // 当前 DC 是否已 BindDC 到 pDWR 的 render target
+  void _ReleaseMemDC();
 };
