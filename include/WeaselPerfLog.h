@@ -131,6 +131,8 @@ class PerfLog : public EnvLog {
 //         生命周期；startui 带 uiStarted 与窗口是否存在，出现
 //         "recover: uiStarted=1 but no panel window" 就说明那条
 //         "Destroy 销毁窗口但标志不复位"的隐患真的被触发了。
+//   [sess] add / remove / client-gone  服务端会话表（total= 当前会话数）。
+//         "client-gone" 是管道断开时的回收：如果 total 只涨不落，就是泄漏。
 class PosLog : public EnvLog {
  public:
   static PosLog& Instance() {

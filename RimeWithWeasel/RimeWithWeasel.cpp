@@ -3,6 +3,7 @@
 #include <RimeWithWeasel.h>
 #include <StringAlgorithm.hpp>
 #include <WeaselConstants.h>
+#include <WeaselPerfLog.h>
 #include <WeaselUtility.h>
 
 #include <filesystem>
@@ -190,6 +191,13 @@ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
   DLOG(INFO) << "Add session: created session_id = " << session_id
              << ", ipc_id = " << ipc_id;
   SessionStatus& session_status = new_session_status(ipc_id);
+  {
+    // 与 [sess] remove / client-gone 配对，用来在真机上观察会话数是否单调增长。
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[sess] add ipc=%u rime=%u total=%u", (unsigned)ipc_id,
+                 (unsigned)session_id, (unsigned)m_session_status_map.size());
+  }
   session_status.style = m_base_style;
   session_status.session_id = session_id;
   _ReadClientInfo(ipc_id, buffer);
@@ -228,7 +236,43 @@ DWORD RimeWithWeaselHandler::RemoveSession(WeaselSessionId ipc_id) {
   rime_api->destroy_session(to_session_id(ipc_id));
   m_session_status_map.erase(ipc_id);
   m_active_session = 0;
+  {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[sess] remove ipc=%u total=%u", (unsigned)ipc_id,
+                 (unsigned)m_session_status_map.size());
+  }
   return 0;
+}
+
+void RimeWithWeaselHandler::DropDetachedSessions(
+    const std::vector<DWORD>& session_ids) {
+  // 命名管道断开 = 那个客户端进程没了（正常退出会先发 END_SESSION，这里是
+  // 崩溃/被杀/未走 Deactivate 的路径）。不清理的话，服务器的
+  // m_session_status_map 与 librime 的 session 会一直留在服务端（长驻进程内存
+  // 单调增长），而 librime 的 cleanup_stale_sessions 我们从来没调用过。
+  //
+  // 只动这些会话自己的东西：不碰 UI（面板可能属于别的活着的客户端），
+  // 只有活跃会话正好是它时才清 m_active_session。
+  unsigned removed = 0;
+  for (DWORD ipc_id : session_ids) {
+    if (ipc_id == 0)
+      continue;
+    if (m_disabled)
+      break;
+    if (m_session_status_map.find(ipc_id) == m_session_status_map.end())
+      continue;  // 已经走过 END_SESSION 或本来就不是会话 id
+    rime_api->destroy_session(to_session_id(ipc_id));
+    m_session_status_map.erase(ipc_id);
+    if (m_active_session == ipc_id)
+      m_active_session = 0;
+    removed++;
+  }
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  if (log.enabled())
+    log.Writef("[sess] client-gone seen=%u removed=%u total=%u",
+               (unsigned)session_ids.size(), removed,
+               (unsigned)m_session_status_map.size());
 }
 
 void RimeWithWeaselHandler::UpdateColorTheme(BOOL darkMode) {

@@ -1,9 +1,11 @@
 ﻿#include "stdafx.h"
 #include "WeaselServerImpl.h"
 #include <mutex>
+#include <set>
 #include <Windows.h>
 #include <resource.h>
 #include <WeaselUtility.h>
+#include <WeaselPerfLog.h>
 
 namespace weasel {
 class PipeServer : public PipeChannel<DWORD, PipeMessage> {
@@ -11,16 +13,22 @@ class PipeServer : public PipeChannel<DWORD, PipeMessage> {
   using ServerRunner = std::function<void()>;
   using Respond = std::function<void(Msg)>;
   using ServerHandler = std::function<void(PipeMessage, Respond)>;
+  // 这条连接断开（客户端进程消失）时回调，参数是它用过的会话 id。正常退出会先
+  // 发 END_SESSION，所以这里覆盖的是崩溃/被杀/未走 Deactivate 的路径。
+  using ClientGone = std::function<void(const std::vector<DWORD>&)>;
 
   PipeServer(std::wstring&& pn_cmd, SECURITY_ATTRIBUTES* s);
 
  public:
-  void Listen(ServerHandler const& handler);
+  void Listen(ServerHandler const& handler, ClientGone const& on_client_gone);
   /* Get a server runner */
-  ServerRunner GetServerRunner(ServerHandler const& handler);
+  ServerRunner GetServerRunner(ServerHandler const& handler,
+                               ClientGone const& on_client_gone);
 
  private:
-  void _ProcessPipeThread(HANDLE pipe, ServerHandler const& handler);
+  void _ProcessPipeThread(HANDLE pipe,
+                          ServerHandler const& handler,
+                          ClientGone const& on_client_gone);
 };
 }  // namespace weasel
 
@@ -188,8 +196,17 @@ int ServerImpl::Run() {
     std::lock_guard guard(g_api_mutex);
     HandlePipeMessage(msg, resp);
   };
-  pipeThread = std::make_unique<boost::thread>(
-      [this, &listener]() { channel->Listen(listener); });
+  // 管道断开 = 客户端进程消失，按它用过的会话回收（与消息处理共用 g_api_mutex，
+  // 因为要进 librime；这里不持有管道锁，不会和收包互相阻塞）。
+  auto on_client_gone = [this](const std::vector<DWORD>& sessions) -> void {
+    std::lock_guard guard(g_api_mutex);
+    if (m_pRequestHandler)
+      m_pRequestHandler->DropDetachedSessions(sessions);
+  };
+  pipeThread = std::make_unique<boost::thread>([this, &listener,
+                                                &on_client_gone]() {
+    channel->Listen(listener, on_client_gone);
+  });
 
   CMessageLoop theLoop;
   _Module.AddMessageLoop(&theLoop);
@@ -429,14 +446,16 @@ void ServerImpl::HandlePipeMessage(PipeMessage pipe_msg, _Resp resp) {
 PipeServer::PipeServer(std::wstring&& pn_cmd, SECURITY_ATTRIBUTES* s)
     : PipeChannel(std::move(pn_cmd), s) {}
 
-void PipeServer::Listen(ServerHandler const& handler) {
+void PipeServer::Listen(ServerHandler const& handler,
+                        ClientGone const& on_client_gone) {
   for (;;) {
     HANDLE pipe = INVALID_HANDLE_VALUE;
     try {
       boost::this_thread::interruption_point();
       pipe = _ConnectServerPipe(pname);
-      boost::thread th(
-          [&handler, pipe, this] { _ProcessPipeThread(pipe, handler); });
+      boost::thread th([&handler, &on_client_gone, pipe, this] {
+        _ProcessPipeThread(pipe, handler, on_client_gone);
+      });
     } catch (DWORD ex) {
       _FinalizePipe(pipe);
     }
@@ -445,19 +464,39 @@ void PipeServer::Listen(ServerHandler const& handler) {
 }
 
 PipeServer::ServerRunner PipeServer::GetServerRunner(
-    ServerHandler const& handler) {
-  return [&handler, this]() { Listen(handler); };
+    ServerHandler const& handler,
+    ClientGone const& on_client_gone) {
+  return [&handler, &on_client_gone, this]() {
+    Listen(handler, on_client_gone);
+  };
 }
 
-void PipeServer::_ProcessPipeThread(HANDLE pipe, ServerHandler const& handler) {
+void PipeServer::_ProcessPipeThread(HANDLE pipe,
+                                    ServerHandler const& handler,
+                                    ClientGone const& on_client_gone) {
+  // 记下这条连接用过的会话：客户端进程崩溃/被杀时不会发 END_SESSION，断开时
+  // 按这个集合回收，否则服务器的 session 表与 librime 的 session 都会留在
+  // 服务端（长驻进程内存单调增长）。
+  std::set<DWORD> sessions;
   try {
     for (;;) {
       Res msg;
       _Receive(pipe, &msg, sizeof(msg));
+      // 客户端发来的消息都把会话 id 放在 lParam；非会话消息（0）忽略。
+      // 万一收到不是会话 id 的值也无害：清理时找不到就跳过。
+      if (msg.lParam != 0)
+        sessions.insert(msg.lParam);
       handler(msg, [this, pipe](Msg resp) { _Send(pipe, resp); });
     }
   } catch (...) {
     _FinalizePipe(pipe);
+  }
+  if (!sessions.empty() && on_client_gone) {
+    try {
+      on_client_gone(std::vector<DWORD>(sessions.begin(), sessions.end()));
+    } catch (...) {
+      // 清理失败不能影响管道线程收尾
+    }
   }
 }
 

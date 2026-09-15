@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <functional>
 #include <memory>
+#include <vector>
 #include <KeyEvent.h>
 
 #define WEASEL_IPC_WINDOW L"WeaselIPCWindow_1.0"
@@ -62,6 +63,10 @@ struct RequestHandler {
   virtual DWORD FindSession(DWORD session_id) { return 0; }
   virtual DWORD AddSession(LPWSTR buffer, EatLine eat = 0) { return 0; }
   virtual DWORD RemoveSession(DWORD session_id) { return 0; }
+  // 客户端进程消失（命名管道断开）时按会话回收。与 RemoveSession 的区别：
+  // 调用方不是那个客户端本身，所以实现里不能顺手把 UI / active_session 里
+  // 属于别人的状态清掉。默认空实现。
+  virtual void DropDetachedSessions(const std::vector<DWORD>& session_ids) {}
   virtual BOOL ProcessKeyEvent(KeyEvent keyEvent,
                                DWORD session_id,
                                EatLine eat) {
