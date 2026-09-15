@@ -176,9 +176,29 @@ class PipeChannel : public PipeChannelBase {
 
   _TyRes _ReceiveResponse() {
     HANDLE* phandle = _GetPipeHandle();
-    _TyRes result;
-    _Receive(*phandle, &result, sizeof(result));
-    return result;
+    _TyRes result{};
+    // 注意：管道句柄是同步句柄（_TryConnect 的 CreateFile 未带
+    // FILE_FLAG_OVERLAPPED），对它传 OVERLAPPED 会被 ReadFile 忽略。
+    // 唯一安全的有界等待是 PeekNamedPipe 轮询。
+    constexpr DWORD kResRecvTimeoutMs = 2000;
+    constexpr DWORD kPeekIntervalMs = 10;
+    for (DWORD waited = 0;;) {
+      DWORD avail = 0;
+      if (!::PeekNamedPipe(*phandle, NULL, 0, NULL, &avail, NULL)) {
+        _Reconnect();            // 管道已断（服务端退出/连接被关）
+        throw ::GetLastError();  // 走既有 catch(DWORD) 路径
+      }
+      if (avail > 0) {
+        _Receive(*phandle, &result, sizeof(result));  // 数据已就位，不会阻塞
+        return result;
+      }
+      if (waited >= kResRecvTimeoutMs) {
+        _Reconnect();       // 超时：丢弃连接，防止残留字节错位
+        throw (DWORD)ERROR_TIMEOUT;
+      }
+      ::Sleep(kPeekIntervalMs);
+      waited += kPeekIntervalMs;
+    }
   }
 
   Stream& _BufferWriteStream() {
