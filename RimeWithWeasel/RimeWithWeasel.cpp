@@ -162,6 +162,11 @@ void RimeWithWeaselHandler::Finalize() {
 DWORD RimeWithWeaselHandler::FindSession(WeaselSessionId ipc_id) {
   if (m_disabled)
     return 0;
+  // Echo 是每个按键都会走的一次探测（客户端 _EnsureServerConnected）。在这里
+  // 结算过期的断链登记：如果这个会话该回收了，本次 Echo 就会返回 0，客户端会
+  // 先重连并新建会话，再去处理按键 —— 顺序上不会"把按键发给一个已销毁的会话"。
+  _ReapDetachedSessions();
+  _CancelDetachedSession(ipc_id);
   Bool found = rime_api->find_session(to_session_id(ipc_id));
   DLOG(INFO) << "Find session: session_id = " << to_session_id(ipc_id)
              << ", found = " << found;
@@ -175,6 +180,7 @@ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
     if (m_disabled)
       return 0;
   }
+  _ReapDetachedSessions();  // 新客户端接入时顺手结算过期登记
   RimeSessionId session_id = (RimeSessionId)rime_api->create_session();
   if (m_global_ascii_mode) {
     for (const auto& pair : m_session_status_map) {
@@ -247,32 +253,86 @@ DWORD RimeWithWeaselHandler::RemoveSession(WeaselSessionId ipc_id) {
 
 void RimeWithWeaselHandler::DropDetachedSessions(
     const std::vector<DWORD>& session_ids) {
-  // 命名管道断开 = 那个客户端进程没了（正常退出会先发 END_SESSION，这里是
-  // 崩溃/被杀/未走 Deactivate 的路径）。不清理的话，服务器的
-  // m_session_status_map 与 librime 的 session 会一直留在服务端（长驻进程内存
-  // 单调增长），而 librime 的 cleanup_stale_sessions 我们从来没调用过。
-  //
-  // 只动这些会话自己的东西：不碰 UI（面板可能属于别的活着的客户端），
-  // 只有活跃会话正好是它时才清 m_active_session。
-  unsigned removed = 0;
+  // 管道断开 = 客户端"可能"没了。正常退出会先发 END_SESSION（那时这里已经找不到
+  // 会话）；崩溃/被杀/未走 Deactivate 才会留下会话。但客户端在 IPC 超时时也会主动
+  // 丢弃本地管道再重连（A1 系列的设计），那种情况它的会话必须留着（ascii 模式与
+  // 合成状态都在里面）—— 所以断链当场不回收，只登记：
+  // 宽限期内该会话又被用到就撤销登记；过期后仍是同一个 librime 会话才真正回收。
+  _ReapDetachedSessions();  // 顺手结算过期的旧登记
+  const ULONGLONG now = ::GetTickCount64();
+  unsigned pending = 0;
   for (DWORD ipc_id : session_ids) {
-    if (ipc_id == 0)
+    if (ipc_id == 0 || m_disabled)
       continue;
-    if (m_disabled)
-      break;
-    if (m_session_status_map.find(ipc_id) == m_session_status_map.end())
+    auto it = m_session_status_map.find(ipc_id);
+    if (it == m_session_status_map.end())
       continue;  // 已经走过 END_SESSION 或本来就不是会话 id
-    rime_api->destroy_session(to_session_id(ipc_id));
-    m_session_status_map.erase(ipc_id);
-    if (m_active_session == ipc_id)
-      m_active_session = 0;
-    removed++;
+    bool already = false;
+    for (const auto& d : m_detached_sessions) {
+      if (d.ipc_id == ipc_id && d.rime_id == it->second.session_id) {
+        already = true;
+        break;
+      }
+    }
+    if (already)
+      continue;
+    m_detached_sessions.push_back({ipc_id, it->second.session_id, now});
+    pending++;
   }
   weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
   if (log.enabled())
-    log.Writef("[sess] client-gone seen=%u removed=%u total=%u",
-               (unsigned)session_ids.size(), removed,
+    log.Writef("[sess] detach seen=%u pending=%u total=%u",
+               (unsigned)session_ids.size(), pending,
                (unsigned)m_session_status_map.size());
+}
+
+void RimeWithWeaselHandler::_CancelDetachedSession(WeaselSessionId ipc_id) {
+  // 这个会话又被用到了 ⇒ 客户端还活着，撤销断链登记。
+  if (m_detached_sessions.empty())
+    return;
+  auto it = m_session_status_map.find(ipc_id);
+  const RimeSessionId rime_id =
+      (it != m_session_status_map.end()) ? it->second.session_id : 0;
+  for (auto d = m_detached_sessions.begin(); d != m_detached_sessions.end();) {
+    if (d->ipc_id == ipc_id && (rime_id == 0 || d->rime_id == rime_id))
+      d = m_detached_sessions.erase(d);
+    else
+      ++d;
+  }
+}
+
+void RimeWithWeaselHandler::_ReapDetachedSessions() {
+  if (m_detached_sessions.empty())
+    return;
+  const ULONGLONG now = ::GetTickCount64();
+  unsigned removed = 0;
+  for (auto d = m_detached_sessions.begin(); d != m_detached_sessions.end();) {
+    if (now - d->detached_at < kDetachedGraceMs) {
+      ++d;
+      continue;
+    }
+    if (!m_disabled) {
+      auto it = m_session_status_map.find(d->ipc_id);
+      // 只有"还是同一个 librime 会话"才回收：ipc_id 会被复用
+      // （_GenerateNewWeaselSessionId 取 max+1），期间新开的会话不算旧账。
+      if (it != m_session_status_map.end() &&
+          it->second.session_id == d->rime_id) {
+        rime_api->destroy_session(to_session_id(d->ipc_id));
+        m_session_status_map.erase(it);
+        if (m_active_session == d->ipc_id)
+          m_active_session = 0;
+        removed++;
+      }
+    }
+    d = m_detached_sessions.erase(d);
+  }
+  if (removed) {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[sess] reap removed=%u pending=%u total=%u", removed,
+                 (unsigned)m_detached_sessions.size(),
+                 (unsigned)m_session_status_map.size());
+  }
 }
 
 void RimeWithWeaselHandler::UpdateColorTheme(BOOL darkMode) {

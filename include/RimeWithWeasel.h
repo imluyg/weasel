@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <WeaselIPC.h>
 #include <WeaselUI.h>
 #include <map>
@@ -117,6 +117,20 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   static std::string m_option_name;
   static std::mutex m_notifier_mutex;
   SessionStatusMap m_session_status_map;
+  // 管道断开是"客户端可能没了"的信号，不是"它一定没了"：客户端在 IPC 超时时
+  // 会主动丢弃本地管道连接（见 A1 系列），下一次按键再重连 —— 那种情况下它的
+  // 会话还得留着（ascii 模式、合成状态都在里面）。所以断链时先登记，宽限期内
+  // 该会话又被用到就撤销登记；超过宽限期仍在、且还是同一个 librime 会话，才真正
+  // 回收（客户端进程崩溃/被杀的那条路径）。
+  struct DetachedSession {
+    WeaselSessionId ipc_id;
+    RimeSessionId rime_id;  // 用来识别 ipc_id 复用：只有同一个 librime 会话才算旧账
+    ULONGLONG detached_at;
+  };
+  std::vector<DetachedSession> m_detached_sessions;
+  void _ReapDetachedSessions();
+  void _CancelDetachedSession(WeaselSessionId ipc_id);
+  static constexpr ULONGLONG kDetachedGraceMs = 60 * 1000;
   bool m_current_dark_mode;
   bool m_global_ascii_mode;
   int m_show_notifications_time;
