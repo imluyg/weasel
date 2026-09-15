@@ -182,7 +182,10 @@ class PipeChannel : public PipeChannelBase {
     // 唯一安全的有界等待是 PeekNamedPipe 轮询。
     constexpr DWORD kResRecvTimeoutMs = 2000;
     constexpr DWORD kPeekIntervalMs = 10;
-    for (DWORD waited = 0;;) {
+    // 用真实时钟做截止时间，而不是「循环次数 × 10ms」：::Sleep(10) 会被系统
+    // 计时器粒度（默认 15.6ms）向上取整，按次数计时的实际上限会漂到约 3.2s。
+    const ULONGLONG deadline = ::GetTickCount64() + kResRecvTimeoutMs;
+    for (;;) {
       DWORD avail = 0;
       if (!::PeekNamedPipe(*phandle, NULL, 0, NULL, &avail, NULL)) {
         _Reconnect();            // 管道已断（服务端退出/连接被关）
@@ -192,12 +195,11 @@ class PipeChannel : public PipeChannelBase {
         _Receive(*phandle, &result, sizeof(result));  // 数据已就位，不会阻塞
         return result;
       }
-      if (waited >= kResRecvTimeoutMs) {
+      if (::GetTickCount64() >= deadline) {
         _Reconnect();       // 超时：丢弃连接，防止残留字节错位
         throw (DWORD)ERROR_TIMEOUT;
       }
       ::Sleep(kPeekIntervalMs);
-      waited += kPeekIntervalMs;
     }
   }
 
