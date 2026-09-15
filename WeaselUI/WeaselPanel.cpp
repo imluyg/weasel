@@ -112,6 +112,81 @@ void WeaselPanel::_ResizeWindow() {
   ReleaseDC(dc);
 }
 
+// 让候选窗宽度不超过它所在显示器的工作区。做法是按住比例缩字号后重排：
+// 不丢候选文本（比截断好），窗口宽度收敛后 _RepositionWindow 的贴边夹取也就不
+// 会把它甩到屏幕最左边。缩到下限仍装不下就放弃，保持原样由夹取兜底（今天的行为）。
+bool WeaselPanel::_FitToWorkAreaWidth() {
+  if (!pDWR || !m_layout || m_ctx.empty())
+    return false;
+  CRect workArea;
+  HMONITOR hMonitor = MonitorFromRect(m_inputPos, MONITOR_DEFAULTTONEAREST);
+  if (hMonitor) {
+    MONITORINFO info;
+    info.cbSize = sizeof(MONITORINFO);
+    if (GetMonitorInfo(hMonitor, &info))
+      workArea = info.rcWork;
+  }
+  if (workArea.IsRectEmpty())
+    return false;
+  // 留几像素余量给圆角/阴影，避免"刚好等于工作区宽"时又被夹一次。
+  const int avail = workArea.Width() - 8;
+  const int cx = m_layout->GetContentSize().cx;
+  if (cx <= 0 || avail <= 0)
+    return false;
+
+  const int kMinPercent = 55;  // 字号下限：配置值的 55%
+  const int kMinPoint = 8;     // 以及绝对下限 8pt
+  int percent = m_fitFontPercent;
+  if (cx > avail) {
+    // 需要更小：按 cx 超出的比例缩（宽度大致与字号线性），目标留 2% 余量，
+    // 因为窗口里还有不随字号缩放的部分（标签间距、圆角等），缩一次常常刚好差几像素。
+    const int target = avail * 98 / 100;
+    int next = (int)((long long)percent * target / cx);
+    if (next >= percent)
+      next = percent - 3;
+    if (next < kMinPercent)
+      next = kMinPercent;
+    if (next >= percent)
+      return false;  // 已到下限，放弃
+    percent = next;
+  } else if (cx <= avail * 97 / 100 && percent < 100) {
+    // 有明显余量：先试着回到皮肤配置的字号（装不下下一轮会再缩回来）
+    percent = 100;
+  } else {
+    return false;  // 落在 [97%, 100%]：收敛，不再动
+  }
+
+  const int labelPoint = m_style.label_font_point * percent / 100;
+  int point = m_style.font_point * percent / 100;
+  const int commentPoint = m_style.comment_font_point * percent / 100;
+  if (point < kMinPoint)
+    point = kMinPoint;
+  try {
+    pDWR->InitResources(
+        m_style.label_font_face,
+        labelPoint > 0 ? labelPoint : m_style.label_font_point, m_style.font_face,
+        point, m_style.comment_font_face,
+        commentPoint > 0 ? commentPoint : m_style.comment_font_point,
+        m_style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT);
+  } catch (...) {
+    // InitResources 里的 HR() 会抛 ComException。Refresh() 不在绘制路径的异常
+    // 边界内，这里必须就地收住：本帧不改字号（绘制路径按 pDWR 判空降级），
+    // 与 B1b「DirectWrite 初始化失败不崩宿主」的口径一致。
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[ui] fit aborted: InitResources threw");
+    return false;
+  }
+  m_fitFontPercent = percent;
+  {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[ui] fit cx=%d avail=%d pct=%d pt=%d", cx, avail, percent,
+                 point);
+  }
+  return true;
+}
+
 void WeaselPanel::_CreateLayout() {
   if (m_layout != NULL)
     delete m_layout;
@@ -191,7 +266,15 @@ void WeaselPanel::Refresh() {
       _CreateLayout();
 
       CDCHandle dc = GetDC();
-      m_layout->DoLayout(dc, pDWR);
+      // 候选行比工作区还宽时按比例缩字号重排，直到装下或到下限。真机上（横向
+      // 布局 + 万象长句候选）见过 1934/1991px 的窗口 vs 1928px 屏宽：窗口随后被
+      // _RepositionWindow 的贴边夹取推到 x=0/左侧，位置对但盖住大片文字。
+      // 缩字号不丢任何候选文本，等于把"最宽"换成"略小"。
+      for (int guard = 0; guard < 4; guard++) {
+        m_layout->DoLayout(dc, pDWR);
+        if (!_FitToWorkAreaWidth())
+          break;
+      }
       ReleaseDC(dc);
       _ResizeWindow();
     }
@@ -214,6 +297,7 @@ void WeaselPanel::_InitFontRes(bool forced) {
   if (forced || (pDWR == NULL) || (m_ostyle != m_style) || (dpiX != dpi)) {
     pDWR.reset();
     m_memBound = false;  // 新的 render target 需要重新 BindDC（复用 DC 时不会自动重绑）
+    m_fitFontPercent = 100;  // 新资源是按皮肤配置的字号建的
     try {
       pDWR = std::make_shared<DirectWriteResources>(m_style, dpiX);
       pDWR->pRenderTarget->SetTextAntialiasMode(

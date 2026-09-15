@@ -86,6 +86,8 @@ class WeaselPanel
   void _CreateLayout();
   void _ResizeWindow();
   void _RepositionWindow(const bool& adj = false);
+  // 候选行比工作区还宽时按比例缩字号重排（true = 已改字号，需要重新 DoLayout）
+  bool _FitToWorkAreaWidth();
   bool _DrawPreedit(const Text& text, CDCHandle dc, const CRect& rc);
   bool _DrawPreeditBack(const Text& text, CDCHandle dc, const CRect& rc);
   bool _DrawCandidates(CDCHandle& dc, bool back = false);
@@ -141,6 +143,8 @@ class WeaselPanel
 
   bool hide_candidates;
   bool m_sticky;
+  // 当前生效的字号百分比（100 = 皮肤里配的字号）；_InitFontRes 重建资源时复位
+  int m_fitFontPercent = 100;
   // for multi font_face & font_point
   PDWR pDWR;
   std::function<void(size_t* const, size_t* const, bool* const, bool* const)>&
