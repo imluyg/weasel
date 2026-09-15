@@ -2,13 +2,23 @@
 #include <string>
 #include <algorithm>
 #include <map>
+#include <mutex>
 #include <WeaselUI.h>
 
 using namespace weasel;
 #define STYLEORWEIGHT (L":[^:]*[^a-f0-9:]+[^:]*")
 
 vector<wstring> ws_split(const wstring& in, const wstring& delim) {
-  std::wregex re{delim};
+  std::wregex re;
+  {
+    static std::mutex _re_mutex;
+    static std::map<std::wstring, std::wregex> _re_cache;
+    std::lock_guard<std::mutex> lock(_re_mutex);
+    auto it = _re_cache.find(delim);
+    if (it == _re_cache.end())
+      it = _re_cache.emplace(delim, std::wregex(delim)).first;
+    re = it->second;  // 拷贝后在锁外使用，避免持锁做匹配
+  }
   return vector<wstring>{
       std::wsregex_token_iterator(in.begin(), in.end(), re, -1),
       std::wsregex_token_iterator()};
@@ -164,7 +174,16 @@ static wstring _MatchWordsOutLowerCaseTrim1st(const wstring& wstr,
                                               const wstring& pat) {
   wstring mat = L"";
   std::wsmatch mc;
-  std::wregex pattern(pat, std::wregex::icase);
+  static const std::wregex re_weight(
+      L"(:thin|:extra_light|:ultra_light|:light|:semi_light|:medium|:demi_bold|"
+      L":semi_bold|:bold|:extra_bold|:ultra_bold|:black|:heavy|:extra_black|:"
+      L"ultra_black)",
+      std::wregex::icase);
+  static const std::wregex re_style(L"(:italic|:oblique|:normal)",
+                                    std::wregex::icase);
+  // 调用方只有两个固定 pattern：weight 以 "(:thin" 开头，style 以 "(:italic" 开头
+  const std::wregex& pattern =
+      (pat.rfind(L"(:italic", 0) == 0) ? re_style : re_weight;
   wstring::const_iterator iter = wstr.cbegin();
   wstring::const_iterator end = wstr.cend();
   while (regex_search(iter, end, mc, pattern)) {
@@ -183,11 +202,11 @@ static wstring _MatchWordsOutLowerCaseTrim1st(const wstring& wstr,
 void DirectWriteResources::_ParseFontFace(const wstring& fontFaceStr,
                                           DWRITE_FONT_WEIGHT& fontWeight,
                                           DWRITE_FONT_STYLE& fontStyle) {
-  const wstring patWeight(
+  static const wstring patWeight(
       L"(:thin|:extra_light|:ultra_light|:light|:semi_light|:medium|:demi_bold|"
       L":semi_bold|:bold|:extra_bold|:ultra_bold|:black|:heavy|:extra_black|:"
       L"ultra_black)");
-  const std::map<wstring, DWRITE_FONT_WEIGHT> _mapWeight = {
+  static const std::map<wstring, DWRITE_FONT_WEIGHT> _mapWeight = {
       {L"thin", DWRITE_FONT_WEIGHT_THIN},
       {L"extra_light", DWRITE_FONT_WEIGHT_EXTRA_LIGHT},
       {L"ultra_light", DWRITE_FONT_WEIGHT_ULTRA_LIGHT},
@@ -209,8 +228,8 @@ void DirectWriteResources::_ParseFontFace(const wstring& fontFaceStr,
   fontWeight =
       (it != _mapWeight.end()) ? it->second : DWRITE_FONT_WEIGHT_NORMAL;
 
-  const wstring patStyle(L"(:italic|:oblique|:normal)");
-  const std::map<wstring, DWRITE_FONT_STYLE> _mapStyle = {
+  static const wstring patStyle(L"(:italic|:oblique|:normal)");
+  static const std::map<wstring, DWRITE_FONT_STYLE> _mapStyle = {
       {L"italic", DWRITE_FONT_STYLE_ITALIC},
       {L"oblique", DWRITE_FONT_STYLE_OBLIQUE},
       {L"normal", DWRITE_FONT_STYLE_NORMAL},
