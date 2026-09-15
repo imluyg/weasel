@@ -165,15 +165,21 @@ void WeaselPanel::Refresh() {
   // only RedrawWindow if no need to hide candidates window, or
   // inline_no_candidates
   if (!hide_candidates || inline_no_candidates) {
-    _InitFontRes();
-    _CreateLayout();
+    const bool content_changed = (m_ctx != m_octx);
+    const bool style_changed = (m_ostyle != m_style);  // 必须在 _InitFontRes() 之前取
+    // 内容与样式都没变时不必重建 Layout、不必重算布局。
+    // 这段跑在 IPC 管道线程上（持 g_api_mutex），省下的时间属于全部客户端。
+    if (!m_layout || content_changed || style_changed) {
+      _InitFontRes();
+      _CreateLayout();
 
-    CDCHandle dc = GetDC();
-    m_layout->DoLayout(dc, pDWR);
-    ReleaseDC(dc);
-    _ResizeWindow();
-    _RepositionWindow();
-    if (m_ctx != m_octx) {
+      CDCHandle dc = GetDC();
+      m_layout->DoLayout(dc, pDWR);
+      ReleaseDC(dc);
+      _ResizeWindow();
+    }
+    _RepositionWindow();  // 保持与原代码一致：每次都执行（只查显示器+SetWindowPos，便宜且安全）
+    if (content_changed) {
       m_octx = m_ctx;
       RedrawWindow();
     }
