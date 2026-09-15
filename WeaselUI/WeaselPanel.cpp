@@ -93,6 +93,9 @@ WeaselPanel::WeaselPanel(weasel::UI& ui)
 }
 
 WeaselPanel::~WeaselPanel() {
+  // 必须在 GdiplusShutdown 之前释放 GDI+ 对象（成员 unique_ptr 的析构发生在
+  // 析构函数体之后，会把 Bitmap 释放推到 GdiplusShutdown 之后，属未定义行为）
+  m_shadowCache.reset();
   Gdiplus::GdiplusShutdown(_m_gdiplusToken);
   delete m_layout;
   m_layout = NULL;
@@ -563,50 +566,53 @@ void WeaselPanel::_HighlightText(CDCHandle& dc,
   // 必须shadow_color都是非完全透明色才做绘制, 全屏状态不绘制阴影保证响应速度
   if (DPI_SCALE(m_style.shadow_radius) && COLORNOTTRANSPARENT(shadowColor) &&
       NOT_FULLSCREENLAYOUT(m_style)) {
-    CRect rect(blurMarginX + DPI_SCALE(m_style.shadow_offset_x),
-               blurMarginY + DPI_SCALE(m_style.shadow_offset_y),
-               rc.Width() + blurMarginX + DPI_SCALE(m_style.shadow_offset_x),
-               rc.Height() + blurMarginY + DPI_SCALE(m_style.shadow_offset_y));
     BYTE r = GetRValue(shadowColor);
     BYTE g = GetGValue(shadowColor);
     BYTE b = GetBValue(shadowColor);
     BYTE alpha = (BYTE)((shadowColor >> 24) & 255);
-    Gdiplus::Color shadow_color = Gdiplus::Color::MakeARGB(alpha, r, g, b);
-    static Gdiplus::Bitmap* pBitmapDropShadow;
-    pBitmapDropShadow = new Gdiplus::Bitmap((INT)rc.Width() + blurMarginX * 2,
-                                            (INT)rc.Height() + blurMarginY * 2,
-                                            PixelFormat32bppPARGB);
+    const int sw = (INT)rc.Width() + blurMarginX * 2;
+    const int sh = (INT)rc.Height() + blurMarginY * 2;
+    const int sr = DPI_SCALE(m_style.shadow_radius);
+    const int sox = DPI_SCALE(m_style.shadow_offset_x);
+    const int soy = DPI_SCALE(m_style.shadow_offset_y);
+    if (!m_shadowCache || m_shadowCacheW != sw || m_shadowCacheH != sh ||
+        m_shadowCacheRadius != sr || m_shadowCacheCorner != radius ||
+        m_shadowCacheColor != shadowColor || m_shadowCacheOffX != sox ||
+        m_shadowCacheOffY != soy) {
+      m_shadowCache.reset(new Gdiplus::Bitmap(sw, sh, PixelFormat32bppPARGB));
+      m_shadowCacheW = sw;
+      m_shadowCacheH = sh;
+      m_shadowCacheRadius = sr;
+      m_shadowCacheCorner = radius;
+      m_shadowCacheColor = shadowColor;
+      m_shadowCacheOffX = sox;
+      m_shadowCacheOffY = soy;
 
-    Gdiplus::Graphics g_shadow(pBitmapDropShadow);
-    g_shadow.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
-    // dropshadow, draw a roundrectangle to blur
-    if (DPI_SCALE(m_style.shadow_offset_x) != 0 ||
-        DPI_SCALE(m_style.shadow_offset_y) != 0) {
-      GraphicsRoundRectPath shadow_path(rect, radius);
-      Gdiplus::SolidBrush shadow_brush(shadow_color);
-      g_shadow.FillPath(&shadow_brush, &shadow_path);
-    }
-    // round shadow, draw multilines as base round line
-    else {
-      int step = alpha / DPI_SCALE(m_style.shadow_radius) / 2;
-      Gdiplus::Pen pen_shadow(shadow_color, (Gdiplus::REAL)1);
-      for (int i = 0; i < DPI_SCALE(m_style.shadow_radius); i++) {
-        GraphicsRoundRectPath round_path(rect, radius + 1 + i);
-        g_shadow.DrawPath(&pen_shadow, &round_path);
-        shadow_color = Gdiplus::Color::MakeARGB(alpha - i * step, r, g, b);
-        pen_shadow.SetColor(shadow_color);
-        rect.InflateRect(1, 1);
+      CRect rect(blurMarginX + sox, blurMarginY + soy,
+                 rc.Width() + blurMarginX + sox,
+                 rc.Height() + blurMarginY + soy);
+      Gdiplus::Color shadow_color = Gdiplus::Color::MakeARGB(alpha, r, g, b);
+      Gdiplus::Graphics g_shadow(m_shadowCache.get());
+      g_shadow.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+      if (sox != 0 || soy != 0) {
+        GraphicsRoundRectPath shadow_path(rect, radius);
+        Gdiplus::SolidBrush shadow_brush(shadow_color);
+        g_shadow.FillPath(&shadow_brush, &shadow_path);
+      } else {
+        int step = alpha / sr / 2;
+        Gdiplus::Pen pen_shadow(shadow_color, (Gdiplus::REAL)1);
+        for (int i = 0; i < sr; i++) {
+          GraphicsRoundRectPath round_path(rect, radius + 1 + i);
+          g_shadow.DrawPath(&pen_shadow, &round_path);
+          shadow_color = Gdiplus::Color::MakeARGB(alpha - i * step, r, g, b);
+          pen_shadow.SetColor(shadow_color);
+          rect.InflateRect(1, 1);
+        }
       }
+      DoGaussianBlur(m_shadowCache.get(), (float)sr, (float)sr);
     }
-    DoGaussianBlur(pBitmapDropShadow, (float)DPI_SCALE(m_style.shadow_radius),
-                   (float)DPI_SCALE(m_style.shadow_radius));
-
-    g_back.DrawImage(pBitmapDropShadow, rc.left - blurMarginX,
+    g_back.DrawImage(m_shadowCache.get(), rc.left - blurMarginX,
                      rc.top - blurMarginY);
-
-    // free memory
-    delete pBitmapDropShadow;
-    pBitmapDropShadow = NULL;
   }
 
   // 必须back_color非完全透明才绘制

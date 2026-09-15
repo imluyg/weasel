@@ -149,4 +149,13 @@ class WeaselPanel
   int m_hoverIndex = -1;
   HMONITOR m_hMonitor = NULL;
   bool m_redraw_by_monitor_change = false;
+  // 阴影位图缓存：避免每个候选每帧重新做一次高斯模糊
+  std::unique_ptr<Gdiplus::Bitmap> m_shadowCache;
+  int m_shadowCacheW = 0;
+  int m_shadowCacheH = 0;
+  int m_shadowCacheRadius = -1;
+  int m_shadowCacheCorner = -1;
+  int m_shadowCacheOffX = 0;
+  int m_shadowCacheOffY = 0;
+  COLORREF m_shadowCacheColor = 0x00000000;
 };
