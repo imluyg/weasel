@@ -389,29 +389,36 @@ DWORD ServerImpl::OnChangePage(WEASEL_IPC_COMMAND uMsg,
 
 template <typename _Resp>
 void ServerImpl::HandlePipeMessage(PipeMessage pipe_msg, _Resp resp) {
-  DWORD result;
-
-  MAP_PIPE_MSG_HANDLE(pipe_msg.Msg, pipe_msg.wParam, pipe_msg.lParam)
-  PIPE_MSG_HANDLE(WEASEL_IPC_ECHO, OnEcho)
-  PIPE_MSG_HANDLE(WEASEL_IPC_START_SESSION, OnStartSession)
-  PIPE_MSG_HANDLE(WEASEL_IPC_END_SESSION, OnEndSession)
-  PIPE_MSG_HANDLE(WEASEL_IPC_PROCESS_KEY_EVENT, OnKeyEvent)
-  PIPE_MSG_HANDLE(WEASEL_IPC_SHUTDOWN_SERVER, OnShutdownServer)
-  PIPE_MSG_HANDLE(WEASEL_IPC_FOCUS_IN, OnFocusIn)
-  PIPE_MSG_HANDLE(WEASEL_IPC_FOCUS_OUT, OnFocusOut)
-  PIPE_MSG_HANDLE(WEASEL_IPC_UPDATE_INPUT_POS, OnUpdateInputPosition)
-  PIPE_MSG_HANDLE(WEASEL_IPC_START_MAINTENANCE, OnStartMaintenance)
-  PIPE_MSG_HANDLE(WEASEL_IPC_END_MAINTENANCE, OnEndMaintenance)
-  PIPE_MSG_HANDLE(WEASEL_IPC_COMMIT_COMPOSITION, OnCommitComposition)
-  PIPE_MSG_HANDLE(WEASEL_IPC_CLEAR_COMPOSITION, OnClearComposition);
-  PIPE_MSG_HANDLE(WEASEL_IPC_SELECT_CANDIDATE_ON_CURRENT_PAGE,
-                  OnSelectCandidateOnCurrentPage);
-  PIPE_MSG_HANDLE(WEASEL_IPC_HIGHLIGHT_CANDIDATE_ON_CURRENT_PAGE,
-                  OnHighlightCandidateOnCurrentPage);
-  PIPE_MSG_HANDLE(WEASEL_IPC_CHANGE_PAGE, OnChangePage);
-  PIPE_MSG_HANDLE(WEASEL_IPC_TRAY_COMMAND, OnCommand);
-  END_MAP_PIPE_MSG_HANDLE(result);
-
+  DWORD result = 0;
+  try {
+    MAP_PIPE_MSG_HANDLE(pipe_msg.Msg, pipe_msg.wParam, pipe_msg.lParam)
+    PIPE_MSG_HANDLE(WEASEL_IPC_ECHO, OnEcho)
+    PIPE_MSG_HANDLE(WEASEL_IPC_START_SESSION, OnStartSession)
+    PIPE_MSG_HANDLE(WEASEL_IPC_END_SESSION, OnEndSession)
+    PIPE_MSG_HANDLE(WEASEL_IPC_PROCESS_KEY_EVENT, OnKeyEvent)
+    PIPE_MSG_HANDLE(WEASEL_IPC_SHUTDOWN_SERVER, OnShutdownServer)
+    PIPE_MSG_HANDLE(WEASEL_IPC_FOCUS_IN, OnFocusIn)
+    PIPE_MSG_HANDLE(WEASEL_IPC_FOCUS_OUT, OnFocusOut)
+    PIPE_MSG_HANDLE(WEASEL_IPC_UPDATE_INPUT_POS, OnUpdateInputPosition)
+    PIPE_MSG_HANDLE(WEASEL_IPC_START_MAINTENANCE, OnStartMaintenance)
+    PIPE_MSG_HANDLE(WEASEL_IPC_END_MAINTENANCE, OnEndMaintenance)
+    PIPE_MSG_HANDLE(WEASEL_IPC_COMMIT_COMPOSITION, OnCommitComposition)
+    PIPE_MSG_HANDLE(WEASEL_IPC_CLEAR_COMPOSITION, OnClearComposition);
+    PIPE_MSG_HANDLE(WEASEL_IPC_SELECT_CANDIDATE_ON_CURRENT_PAGE,
+                    OnSelectCandidateOnCurrentPage);
+    PIPE_MSG_HANDLE(WEASEL_IPC_HIGHLIGHT_CANDIDATE_ON_CURRENT_PAGE,
+                    OnHighlightCandidateOnCurrentPage);
+    PIPE_MSG_HANDLE(WEASEL_IPC_CHANGE_PAGE, OnChangePage);
+    PIPE_MSG_HANDLE(WEASEL_IPC_TRAY_COMMAND, OnCommand);
+    END_MAP_PIPE_MSG_HANDLE(result);
+  } catch (DWORD /* ex */) {
+    result = 0;
+  } catch (...) {
+    // UI / DirectWriteResources 路径抛出的异常（含 HR() 的 ComException）必须
+    // 在回包之后再丢弃：客户端在 _ReceiveResponse 上等这次发送，异常跳过
+    // resp() 会让客户端收不到任何字节而永久阻塞（见任务 A1）。
+    result = 0;
+  }
   resp(result);
 }
 
