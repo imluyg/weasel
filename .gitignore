@@ -57,3 +57,9 @@ arm64x_wrapper/*.ime
 arm64x_wrapper/*.lib
 arm64x_wrapper/*.exp
 docs/
+.zcode/
+.claude/
+.cursor/
+.workbuddy/
+.dsh/
+.opencode/
