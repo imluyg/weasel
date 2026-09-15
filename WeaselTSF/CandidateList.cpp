@@ -3,6 +3,7 @@
 #include "WeaselTSF.h"
 #include "CandidateList.h"
 #include <KeyEvent.h>
+#include <WeaselPerfLog.h>
 #include <math.h>
 
 using namespace std;
@@ -226,6 +227,14 @@ void CCandidateList::UpdateInputPosition(RECT const& rc) {
 }
 
 void CCandidateList::Destroy() {
+  {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      // uiStarted=1 就是那条"标志不复位"的隐患状态：窗口马上被销毁，但标志还是
+      // true，下一次 StartUI() 会被它挡住（现在由 StartUI 自愈兜住）。
+      log.Writef("[cand] destroy uiStarted=%d win=%d", _uiStarted ? 1 : 0,
+                 (_ui && _ui->HasPanelWindow()) ? 1 : 0);
+  }
   _pUIElementMgr = nullptr;
   // EndUI();
   Show(FALSE);
@@ -233,6 +242,12 @@ void CCandidateList::Destroy() {
 }
 
 void CCandidateList::DestroyAll() {
+  {
+    weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+    if (log.enabled())
+      log.Writef("[cand] destroyall uiStarted=%d win=%d", _uiStarted ? 1 : 0,
+                 (_ui && _ui->HasPanelWindow()) ? 1 : 0);
+  }
   _pUIElementMgr = nullptr;
   // EndUI();
   Show(FALSE);
@@ -283,8 +298,24 @@ HRESULT CCandidateList::_UpdateUIElement() {
 }
 
 void CCandidateList::StartUI() {
-  if (_uiStarted)
-    return;
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  const bool logging = log.enabled();
+  const bool have_window = (_ui && _ui->HasPanelWindow());
+  if (logging)
+    log.Writef("[cand] startui uiStarted=%d win=%d", _uiStarted ? 1 : 0,
+               have_window ? 1 : 0);
+  if (_uiStarted) {
+    if (have_window)
+      return;  // UI 会话仍然有效（顶字上屏时合成重启就属于这种），照旧
+    // 不一致状态：Destroy()/DestroyAll() 把面板窗口销毁了，但那两处把 EndUI()
+    // 注释掉了，_uiStarted 仍是 true。若这里直接 return，本次合成永远不会有
+    // 候选窗（位置上报也会在 UI::UpdateInputPosition 里被丢掉），一直要到下一场
+    // 合成走到 EndUI() 才恢复。检测到这个状态就自愈：复位后照常
+    // BeginUIElement + 建窗。
+    if (logging)
+      log.Writef("[cand] startui recover: uiStarted=1 but no panel window");
+    _uiStarted = false;
+  }
 
   com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
   if (!pThreadMgr) {
@@ -305,8 +336,13 @@ void CCandidateList::StartUI() {
                               bool* const next, bool* const scroll_next) {
       _tsf->HandleUICallback(sel, hov, next, scroll_next);
     });
-  if (FAILED(pUIElementMgr->BeginUIElement(this, &_pbShow, &uiid)))
+  HRESULT hr_begin = pUIElementMgr->BeginUIElement(this, &_pbShow, &uiid);
+  if (FAILED(hr_begin)) {
+    if (logging)
+      log.Writef("[cand] startui BeginUIElement failed hr=0x%08lX",
+                 (unsigned long)hr_begin);
     return;
+  }
   _uiStarted = true;
   // pUIElementMgr->UpdateUIElement(uiid);
   if (_pbShow) {
@@ -316,6 +352,10 @@ void CCandidateList::StartUI() {
 }
 
 void CCandidateList::EndUI() {
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  if (log.enabled())
+    log.Writef("[cand] endui uiStarted=%d win=%d", _uiStarted ? 1 : 0,
+               (_ui && _ui->HasPanelWindow()) ? 1 : 0);
   if (!_uiStarted)
     return;
 
@@ -323,8 +363,13 @@ void CCandidateList::EndUI() {
   if (pThreadMgr) {
     com_ptr<ITfUIElementMgr> emgr;
     auto hr = pThreadMgr->QueryInterface(&emgr);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+      // 这里是另一条"标志不复位"的路径：拿不到 ITfUIElementMgr 就提前返回，
+      // _uiStarted 保持 true、窗口也不销毁。记下来，真机若出现就能看到。
+      if (log.enabled())
+        log.Writef("[cand] endui aborted: no ITfUIElementMgr (flag stays 1)");
       return;
+    }
     if (emgr != NULL)
       emgr->EndUIElement(uiid);
   }

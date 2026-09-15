@@ -150,6 +150,10 @@ bool UI::IsShown() const {
   return pimpl_ && pimpl_->IsShown();
 }
 
+bool UI::HasPanelWindow() const {
+  return pimpl_ && pimpl_->panel.IsWindow();
+}
+
 void UI::Refresh() {
   if (pimpl_) {
     pimpl_->Refresh();

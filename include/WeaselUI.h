@@ -49,6 +49,10 @@ class UI {
   void ShowWithTimeout(size_t millisec);
   bool IsCountingDown() const;
   bool IsShown() const;
+  // 面板窗口是否真的存在：Destroy() 只销毁窗口、不重置 _uiStarted，
+  // 调用方（CCandidateList::StartUI）需要用它区分「UI 会话仍然有效」与
+  // 「会话标志还在但窗口已经没了」这两种状态。
+  bool HasPanelWindow() const;
 
   // 重绘界面
   void Refresh();

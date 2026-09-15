@@ -127,6 +127,10 @@ class PerfLog : public EnvLog {
 //   [ui]  repo   _RepositionWindow() 最终算出的屏幕坐标与工作区
 //   [ui]  refresh / create / destroy  面板刷新与窗口生命周期
 //   [ui]  ip-drop  UI::UpdateInputPosition() 因面板窗口不存在而丢弃
+//   [cand] startui / endui / destroy / destroyall  CCandidateList 的 UI 会话
+//         生命周期；startui 带 uiStarted 与窗口是否存在，出现
+//         "recover: uiStarted=1 but no panel window" 就说明那条
+//         "Destroy 销毁窗口但标志不复位"的隐患真的被触发了。
 class PosLog : public EnvLog {
  public:
   static PosLog& Instance() {
