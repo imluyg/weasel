@@ -9,7 +9,7 @@
 using namespace std;
 using namespace weasel;
 
-CCandidateList::CCandidateList(com_ptr<WeaselTSF> pTextService)
+CCandidateList::CCandidateList(WeaselTSF* pTextService)
     : _ui(make_unique<UI>()), _tsf(pTextService), _pbShow(TRUE) {
   _cRef = 1;
 }
@@ -99,6 +99,8 @@ STDMETHODIMP CCandidateList::GetUpdatedFlags(DWORD* pdwFlags) {
 
 STDMETHODIMP CCandidateList::GetDocumentMgr(ITfDocumentMgr** ppdim) {
   *ppdim = nullptr;
+  if (!_tsf)
+    return E_FAIL;
   auto pThreadMgr = _tsf->_GetThreadMgr();
   if (pThreadMgr == nullptr) {
     return E_FAIL;
@@ -158,7 +160,12 @@ STDMETHODIMP CCandidateList::GetCurrentPage(UINT* puPage) {
 }
 
 STDMETHODIMP CCandidateList::SetSelection(UINT nIndex) {
-  _ui->ctx().cinfo.highlighted = nIndex;
+  // nIndex 来自宿主（ITfCandidateListUIElementBehavior::SetSelection），没有范围
+  // 约束；而 highlighted 之后会被当作 m_offsetys[]（定长 MAX_CANDIDATES_COUNT）
+  // 与 _candidateRects[] 的下标使用。越界就忽略，不要存进去。
+  auto& cinfo = _ui->ctx().cinfo;
+  if (nIndex < cinfo.candies.size())
+    cinfo.highlighted = nIndex;
   return S_OK;
 }
 
@@ -168,7 +175,8 @@ STDMETHODIMP CCandidateList::Finalize(void) {
 }
 
 STDMETHODIMP CCandidateList::Abort(void) {
-  _tsf->_AbortComposition(true);
+  if (_tsf)
+    _tsf->_AbortComposition(true);
   Destroy();
   return S_OK;
 }
@@ -196,7 +204,8 @@ STDMETHODIMP CCandidateList::ShowCandidateNumbers(BOOL* pIsShow) {
 }
 
 STDMETHODIMP CCandidateList::FinalizeExactCompositionString() {
-  _tsf->_AbortComposition(false);
+  if (_tsf)
+    _tsf->_AbortComposition(false);
   return E_NOTIMPL;
 }
 
@@ -263,7 +272,7 @@ HWND CCandidateList::_GetActiveWnd() {
   com_ptr<ITfDocumentMgr> pDocumentMgr;
   com_ptr<ITfContext> pContext;
   com_ptr<ITfContextView> pContextView;
-  com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
+  com_ptr<ITfThreadMgr> pThreadMgr = _tsf ? _tsf->_GetThreadMgr() : nullptr;
 
   HWND w = NULL;
 
@@ -285,6 +294,8 @@ HWND CCandidateList::_GetActiveWnd() {
 
 HRESULT CCandidateList::_UpdateUIElement() {
   if (!_pUIElementMgr) {
+    if (!_tsf)
+      return S_OK;
     com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
     if (nullptr == pThreadMgr) {
       return S_OK;
@@ -318,6 +329,8 @@ void CCandidateList::StartUI() {
     _uiStarted = false;
   }
 
+  if (!_tsf)
+    return;  // 失活后没有 TSF 可调，建窗已无意义
   com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
   if (!pThreadMgr) {
     return;
@@ -335,7 +348,8 @@ void CCandidateList::StartUI() {
   if (!_ui->uiCallback())
     _ui->SetUICallBack([this](size_t* const sel, size_t* const hov,
                               bool* const next, bool* const scroll_next) {
-      _tsf->HandleUICallback(sel, hov, next, scroll_next);
+      if (_tsf)
+        _tsf->HandleUICallback(sel, hov, next, scroll_next);
     });
   HRESULT hr_begin = pUIElementMgr->BeginUIElement(this, &_pbShow, &uiid);
   if (FAILED(hr_begin)) {
@@ -360,7 +374,7 @@ void CCandidateList::EndUI() {
   if (!_uiStarted)
     return;
 
-  com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
+  com_ptr<ITfThreadMgr> pThreadMgr = _tsf ? _tsf->_GetThreadMgr() : nullptr;
   if (pThreadMgr) {
     com_ptr<ITfUIElementMgr> emgr;
     auto hr = pThreadMgr->QueryInterface(&emgr);

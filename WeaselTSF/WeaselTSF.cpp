@@ -41,6 +41,11 @@ WeaselTSF::WeaselTSF() {
 WeaselTSF::~WeaselTSF() {
   if (_reconnectThread.joinable())
     _reconnectThread.join();  // 等待重连线程结束，期间成员仍有效
+  // 引用环的最后一环在这里断开：先清掉候选表里指向本对象的裸指针，再让 _cand
+  // 成员析构去释放它。候选表可能被 msctf 通过 ITfUIElement 单独持有着、活得比
+  // 本对象还久，清空后它的方法会走空指针降级分支而不是解引用已释放的 this。
+  if (_cand)
+    _cand->Detach();
   DllRelease();
 }
 
@@ -115,11 +120,21 @@ STDMETHODIMP WeaselTSF::Deactivate() {
 
   _UninitThreadMgrEventSink();
 
+  // 原先只定义了 _UninitThreadFocusSink() 却从不调用：焦点 sink 一直保持 advised，
+  // 失活后仍会回调到本对象，而下面 _pThreadMgr 很快就被置空（_IsKeyboardDisabled()
+  // 等直接解引用它）。必须在 _pThreadMgr = NULL 之前撤销。
+  _UninitThreadFocusSink();
+
   _pThreadMgr = NULL;
 
   _tfClientId = TF_CLIENTID_NULL;
 
   _cand->DestroyAll();
+
+  // 断开引用环：此后本对象不再被候选表强引用，msctf 释放本对象时引用计数能真正
+  // 归零，~WeaselTSF 与 ClientImpl 的析构（唯一的自动 Disconnect）才会执行。
+  if (_cand)
+    _cand->Detach();
 
   return S_OK;
 }
@@ -129,6 +144,11 @@ STDMETHODIMP WeaselTSF::ActivateEx(ITfThreadMgr* pThreadMgr,
                                    DWORD dwFlags) {
   com_ptr<ITfDocumentMgr> pDocMgrFocus;
   _activateFlags = dwFlags;
+
+  // Deactivate 里 Detach 过（见 CCandidateList::_tsf 的说明）：同一个实例被重复
+  // 激活时必须重新挂上，否则本场合成没有候选窗。
+  if (_cand)
+    _cand->Attach(this);
 
   _pThreadMgr = pThreadMgr;
   _tfClientId = tfClientId;

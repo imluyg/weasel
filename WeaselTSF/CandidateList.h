@@ -7,8 +7,12 @@ class WeaselTSF;
 class CCandidateList : public ITfIntegratableCandidateListUIElement,
                        public ITfCandidateListUIElementBehavior {
  public:
-  CCandidateList(com_ptr<WeaselTSF> pTextService);
+  CCandidateList(WeaselTSF* pTextService);
   ~CCandidateList();
+
+  // _tsf 的生命周期由 WeaselTSF 通过 Attach/Detach 显式管理（见成员声明处）。
+  void Attach(WeaselTSF* pTextService) { _tsf = pTextService; }
+  void Detach() { _tsf = nullptr; }
 
   // IUnknown
   STDMETHODIMP QueryInterface(REFIID riid, _Outptr_ void** ppvObj);
@@ -79,7 +83,15 @@ class CCandidateList : public ITfIntegratableCandidateListUIElement,
 
   std::unique_ptr<weasel::UI> _ui;
   DWORD _cRef;
-  com_ptr<WeaselTSF> _tsf;
+  // 必须是不增加引用计数的裸指针。WeaselTSF 用 com_ptr<CCandidateList> 持有本
+  // 对象；若这里再持一个 com_ptr<WeaselTSF>，两者引用计数都降不到 0，
+  // WeaselTSF 的析构函数永不执行 —— 连带 ClientImpl 的析构（唯一的自动
+  // Disconnect 路径）也不执行，于是宿主进程每次激活输入法就泄漏一整棵对象图，
+  // 并在服务端留下一条永不关闭的管道连接。
+  // 因此约定：Activate 期间有效（Attach），Deactivate 与 ~WeaselTSF 里清空
+  // （Detach）；清空后本对象的方法一律走空指针降级分支（不再有 TSF 可调用，
+  // 那属于 msctf 在失活后继续回调，本身就是不该发生的事）。
+  WeaselTSF* _tsf;
   DWORD uiid;
   TfIntegratableCandidateListSelectionStyle _selectionStyle =
       STYLE_ACTIVE_SELECTION;
