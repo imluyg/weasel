@@ -386,6 +386,14 @@ void WeaselPanel::Refresh() {
   bool should_show_icon =
       (m_status.ascii_mode || !m_status.composing || !m_ctx.aux.empty());
   m_candidateCount = min(m_ctx.cinfo.candies.size(), MAX_CANDIDATES_COUNT);
+  // highlighted 有两个来源且都没有范围约束：服务端组包（RimeWithWeasel 直接赋值）
+  // 与宿主经 ITfCandidateListUIElementBehavior::SetSelection 写入。它随后被当作
+  // m_offsetys[]（定长 MAX_CANDIDATES_COUNT）和 _candidateRects[] 的下标使用，
+  // 越界读会被当成矩形偏移/GDI+ 路径半径用。这里统一夹到合法范围。
+  if (m_ctx.cinfo.highlighted < 0)
+    m_ctx.cinfo.highlighted = 0;
+  else if ((size_t)m_ctx.cinfo.highlighted >= (size_t)m_candidateCount)
+    m_ctx.cinfo.highlighted = m_candidateCount > 0 ? (int)m_candidateCount - 1 : 0;
   // When the candidate window changes from having content to having no content,
   // reset the sticky state
   if (m_lastCandidateCount > 0 && m_candidateCount == 0) {
@@ -436,33 +444,45 @@ void WeaselPanel::Refresh() {
       // 每帧先按皮肤自己的 max_width 排一次（量出真实宽度），别继承上一帧的换行宽度
       m_fitWrapWidth = 0;
       m_fitFontShrunkThisFrame = false;
-      _CreateLayout();
-
-      CDCHandle dc = GetDC();
-      // 候选行比预算宽时截断显示文本 / 缩字号重排，直到收敛或到下限。真机上
-      // （横向布局 + 万象长句候选）见过 1934/1991px 的窗口 vs 1928px 屏宽：窗口
-      // 随后被 _RepositionWindow 的贴边夹取推到光标左边近千像素，盖住整行文字。
       m_fitTryLimit = -1;
       m_fitOrigValid = false;  // 每帧重新快照"截断前"的候选文本
       m_fitLastCx = 0;         // 每帧重新判"有没有进展"
-      // 上界放宽到 8：截断到下限本身可能要几轮，缩字号还排在截断之后才轮到。
-      // 收敛靠 _FitToWorkAreaWidth 内部"每轮严格更短 + 到下限转缩字号"保证，
-      // 不靠这个计数（旧实现的 4 次上界正是被不动点白烧掉的）。
-      for (int guard = 0; guard < 8; guard++) {
-        // 换行宽度是在 Layout 构造时进入的（Layout 持有样式副本），所以它一变就
-        // 必须重建；_CreateLayout 会先 delete 旧布局。
-        if (m_layoutWrapWidth != m_fitWrapWidth)
-          _CreateLayout();
-        // 重建之后**仍然**要 DoLayout：构造函数只建对象，内容尺寸是 DoLayout 用
-        // DC 量出来的。漏掉这一步 GetContentSize() 保持 0，_ResizeWindow() 会把
-        // 窗口设成 0x0 —— 候选窗就此消失（真机 pos.log.5216：21 条 fit wrap
-        // 对应 21 帧 win=0x0）。
-        m_layout->DoLayout(dc, pDWR);
-        if (!_FitToWorkAreaWidth())
-          break;
+      // Refresh() 会被 WM_CREATE / OnDpiChanged 与 ITfEditSession::DoEditSession
+      // （经 UI::Update）调到，而 _CreateLayout()/DoLayout() 里的 HR() 会抛
+      // ComException：异常逃进 user32/msctf 就是宿主进程直接崩溃（#1906/#1883
+      // 那一族）。就地收住，本帧不重建布局也不绘制（DoPaint 按 pDWR 判空降级），
+      // 与 B1b「DirectWrite 失败不崩宿主」的口径一致。
+      bool layout_ok = false;
+      CDCHandle dc = GetDC();
+      try {
+        _CreateLayout();
+        // 候选行比预算宽时截断显示文本 / 缩字号重排，直到收敛或到下限。真机上
+        // （横向布局 + 万象长句候选）见过 1934/1991px 的窗口 vs 1928px 屏宽：窗口
+        // 随后被 _RepositionWindow 的贴边夹取推到光标左边近千像素，盖住整行文字。
+        // 上界放宽到 8：截断到下限本身可能要几轮，缩字号还排在截断之后才轮到。
+        // 收敛靠 _FitToWorkAreaWidth 内部"每轮严格更短 + 到下限转缩字号"保证，
+        // 不靠这个计数（旧实现的 4 次上界正是被不动点白烧掉的）。
+        for (int guard = 0; guard < 8; guard++) {
+          // 换行宽度是在 Layout 构造时进入的（Layout 持有样式副本），所以它一变就
+          // 必须重建；_CreateLayout 会先 delete 旧布局。
+          if (m_layoutWrapWidth != m_fitWrapWidth)
+            _CreateLayout();
+          // 重建之后**仍然**要 DoLayout：构造函数只建对象，内容尺寸是 DoLayout 用
+          // DC 量出来的。漏掉这一步 GetContentSize() 保持 0，_ResizeWindow() 会把
+          // 窗口设成 0x0 —— 候选窗就此消失（真机 pos.log.5216：21 条 fit wrap
+          // 对应 21 帧 win=0x0）。
+          m_layout->DoLayout(dc, pDWR);
+          if (!_FitToWorkAreaWidth())
+            break;
+        }
+        layout_ok = true;
+      } catch (...) {
+        if (log.enabled())
+          log.Writef("[ui] refresh aborted: layout threw");
       }
       ReleaseDC(dc);
-      _ResizeWindow();
+      if (layout_ok)
+        _ResizeWindow();
     }
     _RepositionWindow();  // 保持与原代码一致：每次都执行（只查显示器+SetWindowPos，便宜且安全）
     if (content_changed) {
