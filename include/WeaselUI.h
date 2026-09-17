@@ -99,7 +99,12 @@ class UI {
 
 class DirectWriteResources {
  public:
-  DirectWriteResources(weasel::UIStyle& style, UINT dpi);
+  // force_software：强制软件渲染目标（不建 D3D11 设备）。服务端那个永不显示的
+  // 面板用它省掉一整台设备（实测 ~9.6MB NVIDIA 驱动私有内存，且唤醒时不再有
+  // 设备丢失重建）；宿主进程里可见的候选窗保持 DEFAULT 硬件路径不变。
+  DirectWriteResources(weasel::UIStyle& style,
+                       UINT dpi = 96,
+                       bool force_software = false);
   ~DirectWriteResources();
 
   HRESULT InitResources(const std::wstring& label_font_face,

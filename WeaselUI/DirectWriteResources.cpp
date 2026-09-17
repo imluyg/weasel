@@ -25,7 +25,8 @@ vector<wstring> ws_split(const wstring& in, const wstring& delim) {
 }
 
 DirectWriteResources::DirectWriteResources(weasel::UIStyle& style,
-                                           UINT dpi = 96)
+                                           UINT dpi,
+                                           bool force_software)
     : _style(style),
       dpiScaleFontPoint(0),
       dpiScaleLayout(0),
@@ -60,12 +61,14 @@ DirectWriteResources::DirectWriteResources(weasel::UIStyle& style,
   // 渲染路径的全局改变，证据只来自本机合成基准，故不自动启用——先在真机上用
   // .workbuddy\perf\collect_paint.ps1 做 A/B，确认收益后再考虑改默认值。
   {
+    // 调用方指定（服务端隐藏面板）优先；WEASEL_D2D_SOFTWARE=1 仍可强制打开做 A/B。
+    use_software_rt_ = force_software;
     char buf[8] = {0};
     const DWORD n =
         ::GetEnvironmentVariableA("WEASEL_D2D_SOFTWARE", buf, sizeof(buf));
-    if (n > 0 && n < sizeof(buf))
-      use_software_rt_ = (buf[0] == '1');
-    // 未设置：保持 DEFAULT（use_software_rt_ 初值为 false）
+    if (n > 0 && n < sizeof(buf) && buf[0] == '1')
+      use_software_rt_ = true;
+    // 未设置且调用方未指定：保持 DEFAULT（原行为）
   }
   const D2D1_RENDER_TARGET_TYPE rt_type =
       use_software_rt_ ? D2D1_RENDER_TARGET_TYPE_SOFTWARE

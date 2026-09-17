@@ -485,7 +485,10 @@ void WeaselPanel::_InitFontRes(bool forced) {
     m_memBound = false;  // 新的 render target 需要重新 BindDC（复用 DC 时不会自动重绑）
     m_fitFontPercent = 100;  // 新资源是按皮肤配置的字号建的
     try {
-      pDWR = std::make_shared<DirectWriteResources>(m_style, dpiX);
+      // 服务端面板（m_in_server）平时不显示、只用于 1.2s 的通知提示，给它软件渲染
+      // 目标可以省掉一整台 D3D11 设备（~9.6MB 驱动私有内存），并让唤醒不再触发
+      // 设备丢失重建。宿主进程里可见的候选窗（m_in_server == false）保持硬件路径。
+      pDWR = std::make_shared<DirectWriteResources>(m_style, dpiX, m_in_server);
       pDWR->pRenderTarget->SetTextAntialiasMode(
           (D2D1_TEXT_ANTIALIAS_MODE)m_style.antialias_mode);
     } catch (...) {
