@@ -21,6 +21,22 @@ class PipeChannelBase {
         : buffer(std::make_unique<char[]>(bs)), has_body(false) {}
   };
 
+  // TLS 里存这个盒子而不是裸 HANDLE。boost::thread_specific_ptr 的线程退出清理
+  // 只会 delete 盒子，不会关句柄；不在这里自己关的话，任何"用过管道但没显式
+  // Disconnect 就退出"的线程都会把一条已连接的管道实例留到进程结束，服务端那条
+  // 阻塞在 ReadFile 上的连接线程（线程栈 + 64KB ChannelContext）也就永不结束。
+  // 显式 _FinalizePipe 过的句柄会被置为 INVALID_HANDLE_VALUE，析构时自然跳过。
+  struct PipeHandle {
+    HANDLE h = INVALID_HANDLE_VALUE;
+    ~PipeHandle() {
+      if (h != INVALID_HANDLE_VALUE) {
+        ::DisconnectNamedPipe(h);
+        ::CloseHandle(h);
+        h = INVALID_HANDLE_VALUE;
+      }
+    }
+  };
+
   PipeChannelBase(std::wstring&& pn_cmd, size_t bs, SECURITY_ATTRIBUTES* s);
   ~PipeChannelBase();
 
@@ -42,9 +58,9 @@ class PipeChannelBase {
 
   HANDLE* _GetPipeHandle() const {
     if (!hpipe_ptr.get()) {
-      hpipe_ptr.reset(new HANDLE(INVALID_HANDLE_VALUE));
+      hpipe_ptr.reset(new PipeHandle());
     }
-    return hpipe_ptr.get();
+    return &hpipe_ptr.get()->h;
   }
 
   ChannelContext* _GetContext() const {
@@ -56,8 +72,8 @@ class PipeChannelBase {
 
  protected:
   std::wstring pname;
-  // Thread-local pipe handle for isolation
-  mutable boost::thread_specific_ptr<HANDLE> hpipe_ptr;
+  // Thread-local pipe handle for isolation (PipeHandle closes it on thread exit)
+  mutable boost::thread_specific_ptr<PipeHandle> hpipe_ptr;
   const size_t buff_size;
   // Thread-local context for buffer and state
   mutable boost::thread_specific_ptr<ChannelContext> context;
