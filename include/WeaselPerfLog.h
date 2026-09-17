@@ -137,6 +137,10 @@ class PerfLog : public EnvLog {
 //         有客户端拿一个服务端不认识的 ipc_id 来查会话（例如服务端重启后、
 //         或会话被回收后客户端还拿着旧 id）。这条以前是静默的 operator[]，
 //         会往会话表里插幽灵条目；现在只记录，不再插入。
+//   [conn] enter live=N / exit live=N sessions=S
+//         服务端连接线程的生与死（live = 当前活跃连接数）。[sess] 看的是会话表，
+//         连接本身可能既没会话也还活着（客户端不 Disconnect）。判据：长时间使用
+//         后 live 只涨不落即为连接泄漏——每个滞留连接 = 一个线程 + 64KB 缓冲。
 //   [ipc] kseg key=N mask=0x? lookup=.. proc=.. resp=.. ui=..
 //         PROCESS_KEY_EVENT 的函数内分段（毫秒）：lookup = to_session_id，
 //         proc = rime_api->process_key（含 vim_mode 分支），resp = _Respond，

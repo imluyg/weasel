@@ -1,5 +1,6 @@
 ﻿#include "stdafx.h"
 #include "WeaselServerImpl.h"
+#include <atomic>
 #include <mutex>
 #include <set>
 #include <Windows.h>
@@ -8,6 +9,16 @@
 #include <WeaselPerfLog.h>
 
 namespace weasel {
+
+// 活跃连接数。长驻进程里"连接数只增不减"才是内存单调增长的根因，而 [sess] 只
+// 看得到会话表、看不到连接本身（EndSession 会清会话但连接可能还留着）。连接的
+// 生与死各记一条，配合 WEASEL_POS_LOG 采集即可判断是否单调增长。
+static std::atomic<long> g_live_connections{0};
+
+// 串行化所有进入 librime 的调用。管道路径与消息线程（OnColorChange）都必须持有
+// 它：两者会同时读写 m_session_status_map 并调 librime 的非线程安全 API。
+static std::mutex g_api_mutex;
+
 class PipeServer : public PipeChannel<DWORD, PipeMessage> {
  public:
   using ServerRunner = std::function<void()>;
@@ -67,7 +78,15 @@ LRESULT ServerImpl::OnColorChange(UINT uMsg,
                                   BOOL& bHandled) {
   if (IsUserDarkMode() != m_darkMode) {
     m_darkMode = IsUserDarkMode();
-    m_pRequestHandler->UpdateColorTheme(m_darkMode);
+    // 本回调跑在消息线程上，而 UpdateColorTheme 会遍历 m_session_status_map
+    // （逐个 get_status、_LoadSchemaSpecificSettings 并写回 status）以及改写
+    // m_base_style / m_ui->style()；管道线程是在 g_api_mutex 内对同一容器
+    // erase/insert、对同一份 UI 样式赋值的。不共用这把锁，切系统深色模式时正在
+    // 打字就是 map 迭代器失效 + 并发调 librime 的非线程安全 API。
+    if (m_pRequestHandler) {
+      std::lock_guard guard(g_api_mutex);
+      m_pRequestHandler->UpdateColorTheme(m_darkMode);
+    }
   }
   return 0;
 }
@@ -182,8 +201,6 @@ int ServerImpl::Stop() {
   PostMessage(WM_QUIT);
   return 0;
 }
-
-static std::mutex g_api_mutex;
 
 int ServerImpl::Run() {
   // This workaround causes a VC internal error:
@@ -495,6 +512,11 @@ void PipeServer::_ProcessPipeThread(HANDLE pipe,
   // 按这个集合回收，否则服务器的 session 表与 librime 的 session 都会留在
   // 服务端（长驻进程内存单调增长）。
   std::set<DWORD> sessions;
+  weasel::perf::PosLog& log = weasel::perf::PosLog::Instance();
+  const bool logging = log.enabled();
+  const long live = ++g_live_connections;
+  if (logging)
+    log.Writef("[conn] enter live=%ld", live);
   try {
     for (;;) {
       Res msg;
@@ -508,6 +530,10 @@ void PipeServer::_ProcessPipeThread(HANDLE pipe,
   } catch (...) {
     _FinalizePipe(pipe);
   }
+  const long remaining = --g_live_connections;
+  if (logging)
+    log.Writef("[conn] exit live=%ld sessions=%u", remaining,
+               (unsigned)sessions.size());
   if (!sessions.empty() && on_client_gone) {
     try {
       on_client_gone(std::vector<DWORD>(sessions.begin(), sessions.end()));
