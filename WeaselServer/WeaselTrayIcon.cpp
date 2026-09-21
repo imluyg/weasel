@@ -63,7 +63,13 @@ void WeaselTrayIcon::ApplyRefresh() {
     m_refresh_pending = false;
     m_refresh_in_progress = true;
   }
-  Refresh(state);
+  // Refresh() 会调 ATL/WTL 与 Shell_NotifyIcon，任何一处抛异常都会跳过下面复位
+  // m_refresh_in_progress 的语句；而 DisableRefresh()（退出路径）在等这个标志。
+  // 标志必须无条件复位，否则托盘刷新失败会变成"服务端退不掉"。
+  try {
+    Refresh(state);
+  } catch (...) {
+  }
   {
     std::lock_guard<std::mutex> lock(m_state_mutex);
     m_refresh_in_progress = false;
@@ -75,7 +81,10 @@ void WeaselTrayIcon::DisableRefresh() {
   std::unique_lock<std::mutex> lock(m_state_mutex);
   m_refresh_enabled = false;
   m_refresh_pending = false;
-  m_state_cv.wait(lock, [this] { return !m_refresh_in_progress; });
+  // 给等待加上限：上面已经保证标志会复位，这里再兜一层。宁可留一个未完成的托盘
+  // 刷新，也不要在退出路径上无限等下去（原来是无条件 wait）。
+  m_state_cv.wait_for(lock, std::chrono::seconds(2),
+                      [this] { return !m_refresh_in_progress; });
 }
 
 void WeaselTrayIcon::Refresh(const WeaselTrayIconState& state) {

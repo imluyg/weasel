@@ -1,4 +1,6 @@
 ﻿#pragma once
+#include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <string>
 #include <sstream>
@@ -9,6 +11,27 @@ namespace fs = std::filesystem;
 
 inline int utf8towcslen(const char* utf8_str, int utf8_len) {
   return MultiByteToWideChar(CP_UTF8, 0, utf8_str, utf8_len, NULL, 0);
+}
+
+// 候选标签的格式化。**不要用定长缓冲的 swprintf_s<size>(buf, fmt, ...)**：放不下时它
+// 会走 invalid-parameter handler → abort()，既不截断也不抛异常，DoPaint 的 catch(...)
+// 也挡不住（abort 不是异常）。而 format 来自配置（style/label_format、
+// style/label_text_format）、文本来自方案/词库，长度都不受我们控制，所以一个超长 label
+// 就能让宿主进程或服务端直接 abort。这里先量一次所需长度再分配，不用定长缓冲。
+inline std::wstring formatLabelText(const wchar_t* format, const wchar_t* text) {
+  if (text == nullptr)
+    text = L"";
+  if (format == nullptr || format[0] == L'\0')
+    return std::wstring(text);
+  const int need = _scwprintf(format, text);
+  if (need < 0)
+    return std::wstring(text);  // 格式串不被接受：退回原文本，绝不 abort
+  std::wstring buffer(static_cast<size_t>(need) + 1, L'\0');
+  const int written = swprintf_s(&buffer[0], buffer.size(), format, text);
+  if (written < 0)
+    return std::wstring(text);
+  buffer.resize(static_cast<size_t>(written));
+  return buffer;
 }
 
 inline std::wstring getUsername() {
