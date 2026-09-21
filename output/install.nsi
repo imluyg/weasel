@@ -258,10 +258,12 @@ program_files:
       File "rime.dll"
       File "WinSparkle.dll"
     ${Else}
-      File "Win32\WeaselDeployer.exe"
-      File "Win32\WeaselServer.exe"
-      File "Win32\rime.dll"
-      File "Win32\WinSparkle.dll"
+      ; no Win32 binaries in this build: 32-bit Windows is out of scope,
+      ; /nonfatal keeps the installer buildable without output\Win32
+      File /nonfatal "Win32\WeaselDeployer.exe"
+      File /nonfatal "Win32\WeaselServer.exe"
+      File /nonfatal "Win32\rime.dll"
+      File /nonfatal "Win32\WinSparkle.dll"
     ${Endif}
   ; install x64 build for NativeAMD64_BELLOW_WINDOWS11
   ${Else} ; Windows 10 or bellow
@@ -271,10 +273,10 @@ program_files:
       File "rime.dll"
       File "WinSparkle.dll"
     ${Else}
-      File "Win32\WeaselDeployer.exe"
-      File "Win32\WeaselServer.exe"
-      File "Win32\rime.dll"
-      File "Win32\WinSparkle.dll"
+      File /nonfatal "Win32\WeaselDeployer.exe"
+      File /nonfatal "Win32\WeaselServer.exe"
+      File /nonfatal "Win32\rime.dll"
+      File /nonfatal "Win32\WinSparkle.dll"
     ${Endif}
   ${Endif}
 
