@@ -18,7 +18,8 @@ global_ascii: false
 style:
   antialias_mode: default
   ascii_tip_follow_cursor: false
-  color_scheme: aqua
+  color_scheme: willow_green
+  color_scheme_dark: willow_green_dark
   font_face: Microsoft YaHei
   label_font_face: Microsoft YaHei
   comment_font_face: Microsoft YaHei
