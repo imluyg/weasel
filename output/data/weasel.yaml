@@ -574,3 +574,37 @@ preset_color_schemes:
     hilited_candidate_back_color: 0xd8bf00
     comment_text_color: 0x808080
     hilited_comment_text_color: 0x444444
+
+  willow_green:
+    name: "杨柳青／Willow Green"
+    author: "移植自新微软拼音内置皮肤「杨柳青」"
+    color_format: rgba
+    back_color: 0xf4f5f3
+    border_color: 0xf4f5f3
+    text_color: 0x343936
+    candidate_text_color: 0x343936
+    label_color: 0x686f6a
+    comment_text_color: 0x7d807e
+    hilited_text_color: 0x343936
+    hilited_back_color: 0xf4f5f3
+    hilited_candidate_text_color: 0xffffff
+    hilited_candidate_back_color: 0x58b980
+    hilited_label_color: 0xffffff
+    hilited_comment_text_color: 0x426a52
+
+  willow_green_dark:
+    name: "杨柳青·夜／Willow Green Dark"
+    author: "移植自新微软拼音内置皮肤「杨柳青」"
+    color_format: rgba
+    back_color: 0x2d2f2e
+    border_color: 0x2d2f2e
+    text_color: 0xd8dbd8
+    candidate_text_color: 0xd8dbd8
+    label_color: 0xa6aba7
+    comment_text_color: 0x979a97
+    hilited_text_color: 0xd8dbd8
+    hilited_back_color: 0x2d2f2e
+    hilited_candidate_text_color: 0xffffff
+    hilited_candidate_back_color: 0x65c98d
+    hilited_label_color: 0xffffff
+    hilited_comment_text_color: 0xacd4bb
