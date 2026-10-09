@@ -34,7 +34,7 @@ style:
   display_tray_icon: false
   label_format: "%s."
   mark_text: ""
-  hover_type: none # semi_light, hilite
+  hover_type: none # semi_hilite, hilite
   paging_on_scroll: false
   vertical_auto_reverse: false
   vertical_text: false
